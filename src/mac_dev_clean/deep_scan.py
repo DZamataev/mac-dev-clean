@@ -179,11 +179,21 @@ def deep_scan(
                 path=normalized_path(path),
             )
 
+        def _on_unreadable(path: Path) -> None:
+            if emitter is None:
+                return
+            emitter.warning(
+                "Could not read this folder, so anything inside it was not "
+                "scanned.",
+                path=normalized_path(path),
+            )
+
         for repository in discover_repositories(
             [root],
             on_progress=_on_progress,
             should_cancel=_cancelled,
             on_depth_limit=_on_depth_limit,
+            on_unreadable=_on_unreadable,
         ):
             if _cancelled():
                 cancelled = True

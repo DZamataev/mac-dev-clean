@@ -79,6 +79,34 @@ class DeepScanTests(unittest.TestCase):
             "a truncated walk must tell the user, not silently report nothing",
         )
 
+    def test_an_unreadable_folder_warns_instead_of_vanishing(self):
+        # A folder we cannot read contributes nothing, which is indistinguishable
+        # from "nothing to clean in there" unless we say so. Covers any name and
+        # any depth, unlike the protected-folder probe which only knows Desktop,
+        # Documents and Downloads directly under a scan root.
+        blocked = self.home / "work" / "private-archive"
+        blocked.mkdir(parents=True)
+        (blocked / "project").mkdir()
+        os.chmod(str(blocked), 0o000)
+        try:
+            stream = io.StringIO()
+            emitter = EventEmitter(stream, generation=-1)
+            deep_scan(
+                [self.home], self.index, now=NOW, use_fsevents=False, emitter=emitter
+            )
+        finally:
+            os.chmod(str(blocked), 0o755)
+
+        warnings = [
+            json.loads(line)
+            for line in stream.getvalue().splitlines()
+            if line.strip() and json.loads(line)["event"] == "warning"
+        ]
+        self.assertTrue(
+            any("Could not read this folder" in item["message"] for item in warnings),
+            "an unreadable folder must be reported, not silently skipped",
+        )
+
     def test_recommendations_are_persisted_and_the_generation_completes(self):
         expected = build_stale_project(self.home / "app")
 

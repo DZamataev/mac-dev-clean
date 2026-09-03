@@ -117,6 +117,7 @@ def discover_repositories(
     on_progress: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     on_depth_limit: Optional[Callable[[Path], None]] = None,
+    on_unreadable: Optional[Callable[[Path], None]] = None,
 ) -> Iterator[Repository]:
     """Yield every Git repository beneath `roots`.
 
@@ -169,6 +170,13 @@ def discover_repositories(
         try:
             with os.scandir(str(current)) as entries:
                 children = list(entries)
+        except PermissionError:
+            # Same class of silence as the depth limit: an unreadable directory
+            # simply contributes nothing, which reads as "clean" rather than
+            # "never looked". Tell the caller which path was skipped.
+            if on_unreadable is not None:
+                on_unreadable(current)
+            continue
         except OSError:
             continue
 
