@@ -173,6 +173,44 @@ enum DeepScanEventParser {
     }
 }
 
+/// Buffers raw stdout bytes into complete NDJSON lines and parses each into a
+/// `DeepScanEvent`. Extracted from `DeepScanBackend.deepScan`'s read loop so
+/// the "trailing line without a newline" edge case can be unit tested without
+/// spawning a real process.
+struct NDJSONEventAccumulator {
+    private var buffer = Data()
+
+    /// Appends a raw chunk (as delivered by `FileHandle.availableData`) and
+    /// returns every complete, parseable event found in `buffer` so far.
+    /// Bytes after the last newline stay buffered for the next call.
+    mutating func ingest(_ chunk: Data) -> [DeepScanEvent] {
+        buffer.append(chunk)
+        var events: [DeepScanEvent] = []
+        while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let lineData = buffer[buffer.startIndex..<newline]
+            buffer.removeSubrange(buffer.startIndex...newline)
+            if let line = String(data: lineData, encoding: .utf8),
+               let event = DeepScanEventParser.parse(line: line)
+            {
+                events.append(event)
+            }
+        }
+        return events
+    }
+
+    /// Call once after the source has hit EOF. Parses and returns whatever is
+    /// left in `buffer` as a final line -- the tail write may never have had
+    /// a trailing newline -- and clears the buffer. Returns `nil` if nothing
+    /// residual parses to an event.
+    mutating func finish() -> DeepScanEvent? {
+        defer { buffer.removeAll() }
+        guard !buffer.isEmpty,
+              let line = String(data: buffer, encoding: .utf8)
+        else { return nil }
+        return DeepScanEventParser.parse(line: line)
+    }
+}
+
 struct DeepScanWarning: Identifiable, Hashable, Sendable {
     let id = UUID()
     let message: String

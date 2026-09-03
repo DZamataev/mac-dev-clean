@@ -106,6 +106,56 @@ import Testing
     #expect(state.items.count == 1)
 }
 
+/// Defect 3: a final NDJSON line with no trailing newline (e.g. the child's
+/// last write before exit) must not be silently dropped.
+@Test func accumulatorRecoversAFinalLineWithNoTrailingNewline() throws {
+    var accumulator = NDJSONEventAccumulator()
+    let completedLine = #"{"protocol_version":1,"generation":1,"event":"scan_completed","reclaimable_bytes":100,"count":2}"#
+
+    // No trailing "\n" -- this simulates the child's write buffer flushing
+    // its very last bytes without a newline before the process exits.
+    let midStream = accumulator.ingest(Data(completedLine.utf8))
+    #expect(midStream.isEmpty, "a line with no newline yet must stay buffered, not be emitted early")
+
+    let finalEvent = accumulator.finish()
+    guard case let .completed(bytes, count) = try #require(finalEvent) else {
+        Issue.record("expected the buffered line to be recovered as .completed on finish()")
+        return
+    }
+    #expect(bytes == 100)
+    #expect(count == 2)
+
+    // finish() only recovers once; a second call must not re-emit or crash.
+    #expect(accumulator.finish() == nil)
+}
+
+@Test func accumulatorEmitsCompleteLinesAsTheyArriveAndKeepsPartialTailsBuffered() {
+    var accumulator = NDJSONEventAccumulator()
+    let started = #"{"protocol_version":1,"generation":1,"event":"scan_started","roots":["/Users/test/home"],"incremental":false}"#
+
+    // One chunk carries a complete line plus a partial tail of the next line.
+    let firstChunk = Data("\(started)\n{\"protocol_versi".utf8)
+    let events1 = accumulator.ingest(firstChunk)
+    #expect(events1.count == 1)
+    guard case .started = events1[0] else {
+        Issue.record("expected .started from the first complete line")
+        return
+    }
+
+    let secondChunk = Data("on\":1,\"generation\":1,\"event\":\"scan_completed\",\"reclaimable_bytes\":5,\"count\":1}\n".utf8)
+    let events2 = accumulator.ingest(secondChunk)
+    #expect(events2.count == 1)
+    guard case let .completed(bytes, count) = events2[0] else {
+        Issue.record("expected .completed once the tail line's newline finally arrives")
+        return
+    }
+    #expect(bytes == 5)
+    #expect(count == 1)
+
+    // Nothing left over: finish() after a fully newline-terminated stream is a no-op.
+    #expect(accumulator.finish() == nil)
+}
+
 private func item(id: String, bytes: Int64, selected: Bool) -> RecommendationItem {
     RecommendationItem(
         id: id,
@@ -190,6 +240,77 @@ private func item(id: String, bytes: Int64, selected: Bool) -> RecommendationIte
     await model.applyDeepScanSelection()
 
     #expect(await backend.appliedIds.isEmpty)
+}
+
+private actor CancellationRecorder {
+    private(set) var hasStarted = false
+    private(set) var wasCancelledFlag = false
+
+    func markStarted() { hasStarted = true }
+    func markCancelled() { wasCancelledFlag = true }
+}
+
+/// A backend whose `deepScan` never finishes on its own: it suspends inside
+/// `withTaskCancellationHandler` (mirroring the real `DeepScanBackend`) until
+/// the surrounding task is cancelled. This is what lets the test prove
+/// `cancelDeepScan()` actually reaches the in-flight scan instead of just
+/// asserting on `DeepScanState` in isolation.
+private struct HangingDeepScanBackend: DeepScanBackendProtocol {
+    let recorder: CancellationRecorder
+
+    func deepScan(onEvent: @Sendable @escaping (DeepScanEvent) -> Void) async throws {
+        onEvent(.started(roots: ["/Users/test/home"], incremental: false))
+        await recorder.markStarted()
+        try await withTaskCancellationHandler {
+            // Long enough that the test's timeout (well under this) always
+            // wins the race if cancellation never arrives.
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        } onCancel: {
+            Task { await recorder.markCancelled() }
+        }
+    }
+
+    func apply(ids: [String], dryRun: Bool) async throws -> [ApplyResultItem] { [] }
+}
+
+/// Proves defect 1 is fixed: with the pre-fix `Task.detached` bridge in
+/// `AppModel.startDeepScan`, cancelling `deepScanTask` never reaches
+/// `HangingDeepScanBackend.deepScan`'s cancellation handler, so `scanTask`
+/// never settles and this test times out (RED). After propagating
+/// cancellation into the inner task, `deepScan` observes cancellation,
+/// `onCancel` fires, and the scan settles well within the timeout (GREEN).
+@MainActor
+@Test func cancelDeepScanStopsTheRunningScan() async throws {
+    let recorder = CancellationRecorder()
+    let backend = HangingDeepScanBackend(recorder: recorder)
+    let model = AppModel(backend: EmptyCleanupBackend(), deepScanBackend: backend)
+
+    let scanTask = Task { await model.startDeepScan() }
+
+    for _ in 0..<500 where await !recorder.hasStarted {
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    #expect(await recorder.hasStarted, "the fake backend never started scanning")
+
+    model.cancelDeepScan()
+
+    let settled = await withTaskGroup(of: Bool.self) { group in
+        group.addTask {
+            await scanTask.value
+            return true
+        }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            return false
+        }
+        let first = await group.next() ?? false
+        group.cancelAll()
+        return first
+    }
+
+    #expect(settled, "cancelDeepScan() did not stop the running scan within the timeout")
+    #expect(!model.isBusy)
+    #expect(await recorder.wasCancelledFlag, "deepScan's withTaskCancellationHandler never observed cancellation")
 }
 
 private struct EmptyCleanupBackend: CleanupBackendProtocol {

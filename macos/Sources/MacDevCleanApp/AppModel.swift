@@ -193,7 +193,14 @@ final class AppModel: ObservableObject {
         // be a concurrency error under Swift 6 strict checking.
         let task = Task { @MainActor [self] in
             let stream = AsyncStream<DeepScanEvent> { continuation in
-                Task.detached {
+                // Kept detached (rather than a plain, MainActor-inheriting `Task {}`)
+                // so the blocking Process/Pipe I/O in `deepScan` never runs on the
+                // main actor's executor. Detached tasks do not inherit cancellation,
+                // so `onTermination` below is what actually propagates it: cancelling
+                // the outer `deepScanTask` cancels this stream's iteration, which
+                // fires `onTermination`, which cancels `inner`, which is what
+                // `deepScanBackend.deepScan`'s `withTaskCancellationHandler` observes.
+                let inner = Task.detached {
                     do {
                         try await deepScanBackend.deepScan { event in
                             continuation.yield(event)
@@ -203,6 +210,9 @@ final class AppModel: ObservableObject {
                         // when the stream finishes below.
                     }
                     continuation.finish()
+                }
+                continuation.onTermination = { @Sendable _ in
+                    inner.cancel()
                 }
             }
             for await event in stream {
