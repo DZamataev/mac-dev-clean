@@ -1,0 +1,314 @@
+import os
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from mac_dev_clean.discovery import Repository, RepositoryKind
+from mac_dev_clean.projects import (
+    INACTIVITY_DAYS,
+    ArtifactKind,
+    analyze_repository,
+    last_meaningful_activity,
+)
+
+NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+OLD = NOW - timedelta(days=400)
+RECENT = NOW - timedelta(days=2)
+BIG = b"x" * (2 * 1024 * 1024)
+
+
+def touch(path: Path, when: datetime, payload: bytes = b"x") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    stamp = when.timestamp()
+    os.utime(str(path), (stamp, stamp))
+
+
+def primary(root: Path) -> Repository:
+    git_dir = root / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    touch(git_dir / "HEAD", RECENT)
+    return Repository(path=root, kind=RepositoryKind.PRIMARY, git_dir=git_dir)
+
+
+class MeaningfulActivityTests(unittest.TestCase):
+    def test_source_changes_set_the_activity_timestamp(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "package.json", OLD)
+
+            activity = last_meaningful_activity(root, now=NOW)
+
+            self.assertIsNotNone(activity)
+            self.assertLess(activity, NOW - timedelta(days=INACTIVITY_DAYS))
+
+    def test_git_internals_do_not_count_as_activity(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = primary(root)
+            touch(repo.git_dir / "index", RECENT)
+            touch(root / "src" / "main.ts", OLD)
+
+            activity = last_meaningful_activity(root, now=NOW)
+
+            self.assertLess(activity, NOW - timedelta(days=INACTIVITY_DAYS))
+
+    def test_generated_directories_do_not_count_as_activity(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "node_modules" / "pkg" / "index.js", RECENT)
+            touch(root / "ios" / "build" / "app.o", RECENT)
+            touch(root / ".DS_Store", RECENT)
+
+            activity = last_meaningful_activity(root, now=NOW)
+
+            self.assertLess(activity, NOW - timedelta(days=INACTIVITY_DAYS))
+
+    def test_a_recent_source_edit_keeps_the_project_active(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "src" / "util.ts", RECENT)
+
+            activity = last_meaningful_activity(root, now=NOW)
+
+            self.assertGreater(activity, NOW - timedelta(days=INACTIVITY_DAYS))
+
+    def test_a_lock_file_edit_counts_as_activity(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "pnpm-lock.yaml", RECENT)
+
+            activity = last_meaningful_activity(root, now=NOW)
+
+            self.assertGreater(activity, NOW - timedelta(days=INACTIVITY_DAYS))
+
+
+class NodeModulesRecipeTests(unittest.TestCase):
+    def build(self, root: Path, lock_name: str = "pnpm-lock.yaml", age=OLD) -> Path:
+        primary(root)
+        touch(root / "src" / "main.ts", age)
+        touch(root / "package.json", age, b"{}")
+        if lock_name:
+            touch(root / lock_name, age)
+        touch(root / "node_modules" / "pkg" / "index.js", age, BIG)
+        return root / "node_modules"
+
+    def test_node_modules_with_a_lock_file_is_found(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            expected = self.build(root)
+
+            facts = analyze_repository(primary(root), now=NOW)
+
+            node = [item for item in facts if item.recipe.detector_id == "node-modules"]
+            self.assertEqual(len(node), 1)
+            self.assertEqual(node[0].path, expected)
+            self.assertTrue(node[0].lock_satisfied)
+            self.assertGreater(node[0].allocated_bytes, 1024)
+
+    def test_node_modules_without_a_lock_file_is_reported_but_not_lock_satisfied(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.build(root, lock_name="")
+
+            facts = analyze_repository(primary(root), now=NOW)
+
+            node = [item for item in facts if item.recipe.detector_id == "node-modules"]
+            self.assertEqual(len(node), 1)
+            self.assertFalse(node[0].lock_satisfied)
+
+    def test_node_modules_without_a_package_manifest_is_not_a_candidate(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "node_modules" / "pkg" / "index.js", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+
+            self.assertEqual(
+                [item for item in facts if item.recipe.detector_id == "node-modules"], []
+            )
+
+    def test_every_supported_javascript_lock_file_satisfies_the_recipe(self):
+        for lock_name in (
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "bun.lock",
+            "bun.lockb",
+        ):
+            with self.subTest(lock=lock_name), TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.build(root, lock_name=lock_name)
+
+                facts = analyze_repository(primary(root), now=NOW)
+                node = [item for item in facts if item.recipe.detector_id == "node-modules"]
+
+                self.assertTrue(node[0].lock_satisfied, lock_name)
+
+
+class NativeRecipeTests(unittest.TestCase):
+    def test_ios_pods_requires_a_podfile_lock(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "ios" / "Podfile", OLD)
+            touch(root / "ios" / "Pods" / "lib.a", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            pods = [item for item in facts if item.recipe.detector_id == "ios-pods"]
+
+            self.assertEqual(len(pods), 1)
+            self.assertFalse(pods[0].lock_satisfied)
+
+            touch(root / "ios" / "Podfile.lock", OLD)
+            facts = analyze_repository(primary(root), now=NOW)
+            pods = [item for item in facts if item.recipe.detector_id == "ios-pods"]
+
+            self.assertTrue(pods[0].lock_satisfied)
+
+    def test_ios_build_requires_an_xcode_project_or_workspace(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "ios" / "build" / "app.o", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            self.assertEqual(
+                [item for item in facts if item.recipe.detector_id == "ios-build"], []
+            )
+
+            (root / "ios" / "App.xcodeproj").mkdir(parents=True)
+            facts = analyze_repository(primary(root), now=NOW)
+            builds = [item for item in facts if item.recipe.detector_id == "ios-build"]
+
+            self.assertEqual(len(builds), 1)
+            self.assertEqual(builds[0].kind, ArtifactKind.BUILD_OUTPUT)
+
+    def test_android_build_requires_gradle_settings_and_an_app_module(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "android" / "app" / "build" / "out.dex", OLD, BIG)
+            touch(root / "android" / "app" / ".cxx" / "obj.o", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            self.assertEqual(
+                [item for item in facts if item.recipe.detector_id.startswith("android")], []
+            )
+
+            touch(root / "android" / "settings.gradle", OLD)
+            touch(root / "android" / "app" / "build.gradle", OLD)
+            facts = analyze_repository(primary(root), now=NOW)
+            ids = {item.recipe.detector_id for item in facts}
+
+            self.assertIn("android-app-build", ids)
+            self.assertIn("android-app-cxx", ids)
+
+    def test_rust_target_requires_cargo_manifest_and_lock(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "Cargo.toml", OLD)
+            touch(root / "target" / "debug" / "bin", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            rust = [item for item in facts if item.recipe.detector_id == "rust-target"]
+            self.assertFalse(rust[0].lock_satisfied)
+
+            touch(root / "Cargo.lock", OLD)
+            facts = analyze_repository(primary(root), now=NOW)
+            rust = [item for item in facts if item.recipe.detector_id == "rust-target"]
+            self.assertTrue(rust[0].lock_satisfied)
+
+    def test_python_venv_needs_a_deterministic_lock_file(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "pyproject.toml", OLD)
+            touch(root / "requirements.txt", OLD)
+            touch(root / ".venv" / "lib" / "site.py", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            venv = [item for item in facts if item.recipe.detector_id == "python-venv"]
+
+            self.assertEqual(len(venv), 1)
+            self.assertFalse(
+                venv[0].lock_satisfied,
+                "requirements.txt alone must not qualify a venv for default selection",
+            )
+
+            touch(root / "uv.lock", OLD)
+            facts = analyze_repository(primary(root), now=NOW)
+            venv = [item for item in facts if item.recipe.detector_id == "python-venv"]
+
+            self.assertTrue(venv[0].lock_satisfied)
+
+
+class SafetyTests(unittest.TestCase):
+    def test_a_symlinked_artifact_is_never_a_candidate(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "package.json", OLD, b"{}")
+            touch(root / "pnpm-lock.yaml", OLD)
+            elsewhere = root / "shared_modules"
+            elsewhere.mkdir()
+            touch(elsewhere / "pkg" / "index.js", OLD, BIG)
+            os.symlink(str(elsewhere), str(root / "node_modules"))
+
+            facts = analyze_repository(primary(root), now=NOW)
+
+            self.assertEqual(
+                [item for item in facts if item.recipe.detector_id == "node-modules"], []
+            )
+
+    def test_a_worktree_is_analysed_but_never_yields_its_own_root(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            main = root / "main"
+            primary(main)
+            worktree = root / "wt"
+            worktree.mkdir()
+            (worktree / ".git").write_text("gitdir: {}/.git/worktrees/wt\n".format(main))
+            touch(worktree / "package.json", OLD, b"{}")
+            touch(worktree / "pnpm-lock.yaml", OLD)
+            touch(worktree / "node_modules" / "pkg" / "index.js", OLD, BIG)
+
+            repo = Repository(
+                path=worktree,
+                kind=RepositoryKind.WORKTREE,
+                git_dir=main / ".git" / "worktrees" / "wt",
+            )
+            facts = analyze_repository(repo, now=NOW)
+
+            self.assertTrue(facts)
+            for fact in facts:
+                self.assertNotEqual(fact.path, worktree)
+                self.assertTrue(str(fact.path).startswith(str(worktree) + os.sep))
+
+    def test_tiny_artifacts_are_ignored(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "package.json", OLD, b"{}")
+            touch(root / "pnpm-lock.yaml", OLD)
+            touch(root / "node_modules" / "pkg" / "index.js", OLD, b"tiny")
+
+            facts = analyze_repository(primary(root), now=NOW)
+
+            self.assertEqual(facts, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
