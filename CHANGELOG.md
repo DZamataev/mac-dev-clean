@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `deep-scan`, `apply`, and `reset-index` commands. Deep Scan recursively finds
+  Git repositories, measures each project's last meaningful change, and offers
+  reproducible build outputs and lock-file-backed dependency trees from projects
+  inactive for 90 days.
+- A streamed Deep Scan page in the macOS app with live progress, cancellation,
+  per-item evidence, and per-item selection.
+- A local SQLite index at `~/Library/Caches/mac-dev-clean/index.sqlite3` with
+  FSEvents-based incremental rescanning and a safe full-walk fallback whenever
+  the event history is incomplete.
+
 ## 0.5.2 - 2026-07-11
 
 - Added `update_app.sh` to rebuild, safely replace, and relaunch the locally
