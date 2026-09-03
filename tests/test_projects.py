@@ -352,6 +352,48 @@ class SafetyTests(unittest.TestCase):
 
             self.assertEqual(facts, [])
 
+    def test_an_ancestor_symlink_never_yields_a_candidate_outside_the_repo(self):
+        # The `android` directory itself is a symlink pointing at storage
+        # outside the repository. `android/app/build` is not itself a
+        # symlink, so a leaf-only `is_symlink()` check would miss this: the
+        # artifact resolves outside the project and must never be a
+        # candidate.
+        with TemporaryDirectory() as outside_temp, TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+
+            outside = Path(outside_temp) / "SHARED_STORAGE_OUTSIDE_PROJECT"
+            touch(outside / "settings.gradle", OLD)
+            touch(outside / "app" / "build.gradle", OLD)
+            touch(outside / "app" / "build" / "important.bin", OLD, BIG)
+
+            os.symlink(str(outside), str(root / "android"))
+
+            facts = analyze_repository(primary(root), now=NOW)
+
+            self.assertEqual(
+                [item for item in facts if item.recipe.detector_id.startswith("android")],
+                [],
+            )
+
+    def test_a_real_deep_path_inside_the_repo_is_still_a_candidate(self):
+        # Proves the ancestor-symlink guard does not simply disable the
+        # recipe: a genuine, non-symlinked android/app/build inside the
+        # repository must still be found.
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "android" / "settings.gradle", OLD)
+            touch(root / "android" / "app" / "build.gradle", OLD)
+            touch(root / "android" / "app" / "build" / "important.bin", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            ids = {item.recipe.detector_id for item in facts}
+
+            self.assertIn("android-app-build", ids)
+
 
 if __name__ == "__main__":
     unittest.main()

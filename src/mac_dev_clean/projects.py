@@ -293,6 +293,8 @@ def analyze_repository(
     activity = last_meaningful_activity(root, now=moment)
     inactive = activity is not None and activity < moment - timedelta(days=INACTIVITY_DAYS)
 
+    resolved_root = os.path.realpath(str(root))
+
     facts: List[ArtifactFact] = []
     for recipe in RECIPES:
         artifact = root / recipe.relative_path
@@ -302,6 +304,18 @@ def analyze_repository(
             if artifact.is_symlink() or not artifact.is_dir():
                 continue
         except OSError:
+            continue
+
+        # Guard against an ancestor path segment (not the leaf) being a
+        # symlink that routes the artifact outside the repository. The leaf
+        # check above only inspects the final component, so e.g. `android`
+        # being a symlink while `android/app/build` "looks" like a plain
+        # directory would otherwise slip through. Resolve fully and require
+        # containment by path segments, never a bare string prefix test.
+        resolved_artifact = os.path.realpath(str(artifact))
+        if resolved_artifact != resolved_root and not resolved_artifact.startswith(
+            resolved_root + os.sep
+        ):
             continue
 
         manifest = None
