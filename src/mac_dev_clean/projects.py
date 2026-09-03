@@ -275,7 +275,10 @@ def _first_existing(root: Path, names: Tuple[str, ...]) -> Optional[str]:
 def _first_matching_glob(root: Path, patterns: Tuple[str, ...]) -> Optional[str]:
     for pattern in patterns:
         for match in root.glob(pattern):
-            if match.exists():
+            # A marker only opens the gate for a recipe, so a symlinked one is
+            # evidence about somewhere else's project, not this one. Refuse it
+            # rather than letting an outside link vouch for a deletion here.
+            if match.exists() and not match.is_symlink():
                 return pattern
     return None
 

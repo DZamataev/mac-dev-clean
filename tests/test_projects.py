@@ -316,6 +316,23 @@ class SafetyTests(unittest.TestCase):
                 [item for item in facts if item.recipe.detector_id == "node-modules"], []
             )
 
+    def test_a_symlinked_marker_does_not_gate_a_recipe(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            outside = Path(temp) / "outside_project"
+            touch(outside / "project.pbxproj", OLD, b"{}")
+            (root / "ios").mkdir()
+            os.symlink(str(outside), str(root / "ios" / "App.xcodeproj"))
+            touch(root / "ios" / "Podfile.lock", OLD)
+            touch(root / "ios" / "build" / "output.bin", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+
+            self.assertEqual(
+                [item for item in facts if item.recipe.detector_id == "ios-build"], []
+            )
+
     def test_a_worktree_is_analysed_but_never_yields_its_own_root(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)
