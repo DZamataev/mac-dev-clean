@@ -54,6 +54,40 @@ class ClassifyTests(unittest.TestCase):
 
             self.assertEqual(found.kind, RepositoryKind.SUBMODULE)
 
+    def test_a_submodule_under_a_directory_named_worktrees_is_a_submodule(self):
+        # Regression: classification must be anchored to the segment
+        # directly above the gitdir target, not a substring search over
+        # the whole path. A user directory literally named "worktrees"
+        # must not hijack the decision when the real marker is "modules".
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            outer = root / "worktrees" / "super"
+            make_primary(outer)
+            sub = outer / "sub"
+            sub.mkdir()
+            (sub / ".git").write_text("gitdir: ../.git/modules/sub\n")
+
+            found = classify_git_entry(sub)
+
+            self.assertEqual(found.kind, RepositoryKind.SUBMODULE)
+
+    def test_a_linked_worktree_of_a_submodule_is_a_worktree(self):
+        # Regression: the gitdir contains both "modules" and "worktrees"
+        # segments (.../.git/modules/sub/worktrees/wt). Only the segment
+        # directly above the target ("worktrees") should decide the kind.
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            main = make_primary(root / "super")
+            worktree = root / "wt-of-sub"
+            worktree.mkdir()
+            (worktree / ".git").write_text(
+                "gitdir: {}/.git/modules/sub/worktrees/wt\n".format(main)
+            )
+
+            found = classify_git_entry(worktree)
+
+            self.assertEqual(found.kind, RepositoryKind.WORKTREE)
+
     def test_a_directory_without_git_metadata_is_not_a_repository(self):
         with TemporaryDirectory() as temp:
             self.assertIsNone(classify_git_entry(Path(temp)))

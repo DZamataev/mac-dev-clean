@@ -84,10 +84,22 @@ def classify_git_entry(path: Path) -> Optional[Repository]:
     git_dir = Path(pointer)
     if not git_dir.is_absolute():
         git_dir = (path / git_dir)
-    parts = git_dir.parts
-    if "worktrees" in parts:
+    # Real git layouts always place the marker directly above the entry's
+    # own directory name: `<gitdir>/worktrees/<name>` or
+    # `<gitdir>/modules/<name>`. Anchor classification to that position
+    # (the second-to-last path segment) rather than searching the whole
+    # path for "worktrees" or "modules" anywhere: a user directory that
+    # happens to be named `worktrees` or `modules` must not hijack the
+    # decision. Normalize first because the pointer may be relative
+    # (e.g. `../.git/modules/sub`) and contain `..` segments that would
+    # otherwise land in the wrong position.
+    parts = Path(os.path.normpath(str(git_dir))).parts
+    if len(parts) < 2:
+        return None
+    marker_segment = parts[-2]
+    if marker_segment == "worktrees":
         kind = RepositoryKind.WORKTREE
-    elif "modules" in parts:
+    elif marker_segment == "modules":
         kind = RepositoryKind.SUBMODULE
     else:
         return None
@@ -118,6 +130,13 @@ def discover_repositories(
         stack.append((expanded, 0))
 
     while stack:
+        # Cancellation granularity is one directory: this check fires once
+        # per popped directory, before its `scandir`. If that directory is
+        # a single huge flat directory (a Mail store, a Photos library
+        # package, etc.) that is not in PRUNED_DIR_NAMES, the scandir below
+        # still runs to completion before the next check — worst-case
+        # cancellation latency is one full scandir of the largest directory
+        # encountered. Behaviour stays bounded, never hung.
         if should_cancel is not None and should_cancel():
             return
         current, depth = stack.pop()
