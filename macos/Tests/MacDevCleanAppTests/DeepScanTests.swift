@@ -129,6 +129,33 @@ import Testing
     #expect(accumulator.finish() == nil)
 }
 
+@Test func accumulatorSurvivesAMultiByteCharacterSplitAcrossReads() {
+    // `availableData` chunks at arbitrary byte offsets, so a non-ASCII path --
+    // Cyrillic, CJK, an emoji in a folder name -- can be cut mid-character.
+    // Splitting on the newline BYTE and decoding only whole lines is what makes
+    // that safe; decoding each chunk as it arrived would corrupt the path.
+    var accumulator = NDJSONEventAccumulator()
+    let path = "/Users/test/Разработка/проект/node_modules"
+    let line = #"{"protocol_version":1,"generation":1,"event":"warning","message":"m","path":"\#(path)"}"#
+    var bytes = Array(Data("\(line)\n".utf8))
+
+    // Cut inside the first Cyrillic character: one byte of it lands in chunk 1.
+    let firstCyrillicByte = bytes.firstIndex { $0 >= 0xD0 } ?? 0
+    let cut = firstCyrillicByte + 1
+    let chunk1 = Data(bytes[0..<cut])
+    let chunk2 = Data(bytes[cut...])
+
+    #expect(accumulator.ingest(chunk1).isEmpty)
+    let events = accumulator.ingest(chunk2)
+    #expect(events.count == 1)
+    guard case let .warning(_, decodedPath) = events[0] else {
+        Issue.record("expected .warning once the split character was reassembled")
+        return
+    }
+    #expect(decodedPath == path)
+    bytes.removeAll()
+}
+
 @Test func accumulatorEmitsCompleteLinesAsTheyArriveAndKeepsPartialTailsBuffered() {
     var accumulator = NDJSONEventAccumulator()
     let started = #"{"protocol_version":1,"generation":1,"event":"scan_started","roots":["/Users/test/home"],"incremental":false}"#
