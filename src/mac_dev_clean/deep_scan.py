@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
 from . import fsevents
-from .discovery import discover_repositories
+from .discovery import MAX_DEPTH, discover_repositories
 from .events import EventEmitter
 from .index import ScanIndex
 from .policy import recommend
@@ -170,8 +170,20 @@ def deep_scan(
             if emitter is not None and scanned % PROGRESS_EVERY == 0:
                 emitter.progress(path=path, scanned=scanned)
 
+        def _on_depth_limit(path: Path) -> None:
+            if emitter is None:
+                return
+            emitter.warning(
+                "Stopped descending at {0} levels; anything deeper was not "
+                "scanned.".format(MAX_DEPTH),
+                path=normalized_path(path),
+            )
+
         for repository in discover_repositories(
-            [root], on_progress=_on_progress, should_cancel=_cancelled
+            [root],
+            on_progress=_on_progress,
+            should_cancel=_cancelled,
+            on_depth_limit=_on_depth_limit,
         ):
             if _cancelled():
                 cancelled = True

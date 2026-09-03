@@ -116,6 +116,7 @@ def discover_repositories(
     roots: Sequence[Path],
     on_progress: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    on_depth_limit: Optional[Callable[[Path], None]] = None,
 ) -> Iterator[Repository]:
     """Yield every Git repository beneath `roots`.
 
@@ -141,6 +142,11 @@ def discover_repositories(
             return
         current, depth = stack.pop()
         if depth > MAX_DEPTH:
+            # Report rather than truncate silently: a repository below this
+            # depth is simply absent from the results, which is indistinguishable
+            # from "nothing to clean here" for anyone reading the UI.
+            if on_depth_limit is not None:
+                on_depth_limit(current)
             continue
         try:
             stat_result = os.stat(str(current), follow_symlinks=False)

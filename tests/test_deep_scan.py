@@ -55,6 +55,30 @@ class DeepScanTests(unittest.TestCase):
         item = next(i for i in result.recommendations if i.path == expected)
         self.assertTrue(item.selected_by_default)
 
+    def test_a_directory_below_the_depth_limit_warns_instead_of_vanishing(self):
+        from mac_dev_clean.discovery import MAX_DEPTH
+
+        deep = self.home
+        for index in range(MAX_DEPTH + 2):
+            deep = deep / "level{0}".format(index)
+        build_stale_project(deep)
+
+        stream = io.StringIO()
+        emitter = EventEmitter(stream, generation=-1)
+        deep_scan(
+            [self.home], self.index, now=NOW, use_fsevents=False, emitter=emitter
+        )
+
+        warnings = [
+            json.loads(line)
+            for line in stream.getvalue().splitlines()
+            if line.strip() and json.loads(line)["event"] == "warning"
+        ]
+        self.assertTrue(
+            any("Stopped descending" in item["message"] for item in warnings),
+            "a truncated walk must tell the user, not silently report nothing",
+        )
+
     def test_recommendations_are_persisted_and_the_generation_completes(self):
         expected = build_stale_project(self.home / "app")
 
