@@ -408,7 +408,11 @@ def run_deep_scan(args: argparse.Namespace) -> int:
 
     index = open_index(args.index)
     try:
-        emitter = None if args.json else EventEmitter(sys.stdout, generation=0)
+        # The generation is assigned by the index once the scan starts, so the
+        # envelope cannot carry it yet. Emit -1 rather than a plausible-looking
+        # 0, which reads as a real generation number next to the recommendation
+        # payloads that carry the true one.
+        emitter = None if args.json else EventEmitter(sys.stdout, generation=-1)
         result = deep_scan(
             roots,
             index,
