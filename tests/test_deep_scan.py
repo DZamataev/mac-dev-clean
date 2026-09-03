@@ -164,6 +164,54 @@ class DeepScanTests(unittest.TestCase):
         self.assertFalse(result.cancelled)
         self.assertTrue(result.recommendations)
 
+    def test_a_denied_protected_folder_emits_permission_required(self):
+        # macOS TCC lets `stat`/`is_dir` succeed on Desktop/Documents/
+        # Downloads without Full Disk Access, but denies listing their
+        # contents. Without a dedicated probe, that folder's repositories
+        # just vanish from the results with no explanation. `chmod 0o000`
+        # reproduces the same PermissionError-on-scandir shape locally.
+        build_stale_project(self.home / "app")
+        documents = self.home / "Documents"
+        documents.mkdir()
+        os.chmod(str(documents), 0o000)
+        stream = io.StringIO()
+        try:
+            deep_scan(
+                [self.home],
+                self.index,
+                emitter=EventEmitter(stream, generation=1),
+                now=NOW,
+                use_fsevents=False,
+            )
+        finally:
+            os.chmod(str(documents), 0o755)
+
+        events = [json.loads(line) for line in stream.getvalue().splitlines() if line]
+        permission_events = [e for e in events if e["event"] == "permission_required"]
+        self.assertEqual(len(permission_events), 1)
+        self.assertEqual(permission_events[0]["folder"], "Documents")
+
+    def test_an_ordinary_folder_never_emits_permission_required(self):
+        # No-regression: a folder that is not Desktop/Documents/Downloads,
+        # and one of those three folders that is perfectly readable, must
+        # never trigger the event.
+        build_stale_project(self.home / "app")
+        (self.home / "Desktop").mkdir()
+        (self.home / "Documents").mkdir()
+        (self.home / "Downloads").mkdir()
+        stream = io.StringIO()
+
+        deep_scan(
+            [self.home],
+            self.index,
+            emitter=EventEmitter(stream, generation=1),
+            now=NOW,
+            use_fsevents=False,
+        )
+
+        events = [json.loads(line) for line in stream.getvalue().splitlines() if line]
+        self.assertEqual([e for e in events if e["event"] == "permission_required"], [])
+
 
 class DefaultRootTests(unittest.TestCase):
     def test_default_roots_exclude_the_library_folder(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,12 @@ from .policy import recommend
 from .projects import analyze_repository
 from .recommendation import Recommendation, normalized_path
 
+# Folders macOS TCC (Transparency, Consent, and Control) treats specially:
+# even without Full Disk Access, `stat` on these succeeds but *listing*
+# their contents raises PermissionError. When that happens during a scan,
+# `permission_required` tells the UI which folder to grant access to,
+# instead of the folder's repositories silently and unexplainably vanishing
+# from the results.
 PROTECTED_FOLDER_NAMES = ("Desktop", "Documents", "Downloads")
 
 PROGRESS_EVERY = 25
@@ -64,6 +71,53 @@ def _probe_incremental(
     return changed is not None
 
 
+def _protected_folder_targets(root: Path) -> List[Path]:
+    """Candidate paths under `root` that macOS TCC may deny even though the
+    parent directory itself is readable: the root itself if it happens to be
+    one of `PROTECTED_FOLDER_NAMES`, plus any direct child bearing one of
+    those names."""
+    targets: List[Path] = []
+    if root.name in PROTECTED_FOLDER_NAMES:
+        targets.append(root)
+    for name in PROTECTED_FOLDER_NAMES:
+        child = root / name
+        if child not in targets:
+            targets.append(child)
+    return targets
+
+
+def _check_protected_folder_access(root: Path, emitter: Optional[EventEmitter]) -> None:
+    """Proactively probe well-known TCC-protected folders under `root` and
+    report which ones are denied.
+
+    `stat`/`is_dir` on a TCC-protected folder succeed even without access;
+    only listing its contents (`scandir`) raises `PermissionError`. Without
+    this, a folder Full Disk Access has not been granted for simply
+    contributes zero repositories with no explanation -- indistinguishable
+    from an empty folder. `discover_repositories` already tolerates the same
+    `OSError` silently during its own walk (existing, tested behaviour); this
+    check runs first only so the UI can name the folder and prompt for
+    access, via the `permission_required` event the Swift side already
+    consumes.
+    """
+    if emitter is None:
+        return
+    for target in _protected_folder_targets(root):
+        try:
+            is_dir = target.is_dir() and not target.is_symlink()
+        except OSError:
+            continue
+        if not is_dir:
+            continue
+        try:
+            with os.scandir(str(target)):
+                pass
+        except PermissionError:
+            emitter.permission_required(target, target.name)
+        except OSError:
+            continue
+
+
 def deep_scan(
     roots: Sequence[Path],
     index: ScanIndex,
@@ -107,6 +161,8 @@ def deep_scan(
         if emitter is not None:
             emitter.root_started(root)
         repositories = 0
+
+        _check_protected_folder_access(root, emitter)
 
         def _on_progress(path: str) -> None:
             nonlocal scanned
