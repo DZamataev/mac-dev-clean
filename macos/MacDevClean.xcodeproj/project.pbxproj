@@ -110,7 +110,7 @@
 			isa = PBXGroup;
 			children = (
 				6271B2A237B148D44C65E4EB /* AppBundle */,
-				DE045FC85BBF74E08B9CDEDF /* deep-scan-phase-1 */,
+				DE045FC85BBF74E08B9CDEDF /* mac-dev-clean */,
 				D451FE5888CCEA20A1449E5A /* Sources */,
 				C8EC1707B39BAE52754AEA8C /* Tests */,
 				926A61DE564274453E55B1C3 /* Products */,
@@ -139,7 +139,7 @@
 			path = MacDevCleanApp;
 			sourceTree = "<group>";
 		};
-		DE045FC85BBF74E08B9CDEDF /* deep-scan-phase-1 */ = {
+		DE045FC85BBF74E08B9CDEDF /* mac-dev-clean */ = {
 			isa = PBXGroup;
 			children = (
 				2506D666CF72BFD7033ADCF1 /* BRANDING.md */,
@@ -147,7 +147,7 @@
 				685C3FBDD0F23FCEF7CF5CD1 /* assets */,
 				7AC7F7AC98CDA77A755E81F3 /* raven_vector_logos */,
 			);
-			name = "deep-scan-phase-1";
+			name = "mac-dev-clean";
 			path = ..;
 			sourceTree = "<group>";
 		};
