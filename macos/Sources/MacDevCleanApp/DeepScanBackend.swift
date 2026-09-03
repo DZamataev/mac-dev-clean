@@ -125,9 +125,15 @@ struct DeepScanBackend: DeepScanBackendProtocol, Sendable {
                 pythonPath: location.pythonPath
             )
             try process.run()
+            // Both pipes must be drained BEFORE waiting, and concurrently with
+            // each other: `apply` prints one JSON object per item, so a large
+            // selection (~200 items) overflows the ~64KB pipe buffer and the
+            // child blocks on write while the parent blocks in waitUntilExit.
+            async let stdoutData = Self.drainToEnd(stdoutPipe.fileHandleForReading)
+            async let stderrBytes = Self.drainToEnd(stderrPipe.fileHandleForReading)
+            let stdout = await stdoutData
+            let stderrData = await stderrBytes
             process.waitUntilExit()
-            let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             return CommandResult(
                 stdout: stdout,
                 stderr: String(data: stderrData, encoding: .utf8) ?? "",
