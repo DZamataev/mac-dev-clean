@@ -194,6 +194,9 @@ def _decode(payload: dict) -> Recommendation:
 
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # sqlite3.connect() succeeds even for a corrupt file because the database is
+    # opened lazily; the failure surfaces on the first statement. Close the
+    # handle before propagating, or a rebuilt index leaks the dead connection.
     connection = sqlite3.connect(str(path))
     try:
         connection.executescript(_SCHEMA)
