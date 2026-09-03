@@ -91,6 +91,49 @@ class MeaningfulActivityTests(unittest.TestCase):
 
             self.assertGreater(activity, NOW - timedelta(days=INACTIVITY_DAYS))
 
+    def test_a_deeply_nested_source_edit_keeps_the_project_active(self):
+        # Java/Kotlin package layouts under android/src/main/java/com/... are
+        # routine in React Native / Android projects and commonly exceed 8
+        # directory levels. A recent edit that far down must still count.
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            deep_file = (
+                root
+                / "android"
+                / "src"
+                / "main"
+                / "java"
+                / "com"
+                / "example"
+                / "app"
+                / "feature"
+                / "module"
+                / "detail"
+                / "view"
+                / "widget"
+                / "Widget.kt"
+            )
+            self.assertGreaterEqual(
+                len(deep_file.relative_to(root).parts) - 1,
+                12,
+                "fixture must place the file at least 12 levels below the repo root",
+            )
+            touch(deep_file, RECENT)
+
+            activity = last_meaningful_activity(root, now=NOW)
+
+            self.assertGreater(activity, NOW - timedelta(days=INACTIVITY_DAYS))
+
+            repo = Repository(path=root, kind=RepositoryKind.PRIMARY, git_dir=root / ".git")
+            facts = analyze_repository(repo, now=NOW)
+            for fact in facts:
+                self.assertFalse(
+                    fact.inactive,
+                    "a project with a recent deeply-nested edit must not be inactive",
+                )
+
 
 class NodeModulesRecipeTests(unittest.TestCase):
     def build(self, root: Path, lock_name: str = "pnpm-lock.yaml", age=OLD) -> Path:

@@ -49,8 +49,6 @@ GENERATED_DIR_NAMES = frozenset(
 GENERATED_FILE_NAMES = frozenset({".DS_Store", "Thumbs.db"})
 GENERATED_FILE_SUFFIXES = (".log", ".pyc", ".swp", ".tmp", ".orig")
 
-ACTIVITY_MAX_DEPTH = 8
-
 
 class ArtifactKind(Enum):
     DEPENDENCY_TREE = "dependency_tree"
@@ -238,11 +236,9 @@ def last_meaningful_activity(
     long-abandoned project look active.
     """
     newest = 0.0
-    stack = [(repo_path, 0)]
+    stack = [repo_path]
     while stack:
-        current, depth = stack.pop()
-        if depth > ACTIVITY_MAX_DEPTH:
-            continue
+        current = stack.pop()
         try:
             with os.scandir(str(current)) as entries:
                 children = list(entries)
@@ -254,7 +250,7 @@ def last_meaningful_activity(
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     if entry.name not in GENERATED_DIR_NAMES:
-                        stack.append((Path(entry.path), depth + 1))
+                        stack.append(Path(entry.path))
                     continue
                 if _is_generated_file(entry.name):
                     continue
