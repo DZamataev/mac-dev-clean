@@ -66,8 +66,17 @@ targets:
           - $(SRCROOT)/../src/mac_dev_clean/age.py
           - $(SRCROOT)/../src/mac_dev_clean/cleaner.py
           - $(SRCROOT)/../src/mac_dev_clean/cli.py
+          - $(SRCROOT)/../src/mac_dev_clean/deep_scan.py
+          - $(SRCROOT)/../src/mac_dev_clean/discovery.py
+          - $(SRCROOT)/../src/mac_dev_clean/events.py
+          - $(SRCROOT)/../src/mac_dev_clean/executor.py
+          - $(SRCROOT)/../src/mac_dev_clean/fsevents.py
+          - $(SRCROOT)/../src/mac_dev_clean/index.py
           - $(SRCROOT)/../src/mac_dev_clean/model.py
           - $(SRCROOT)/../src/mac_dev_clean/output.py
+          - $(SRCROOT)/../src/mac_dev_clean/policy.py
+          - $(SRCROOT)/../src/mac_dev_clean/projects.py
+          - $(SRCROOT)/../src/mac_dev_clean/recommendation.py
           - $(SRCROOT)/../src/mac_dev_clean/scanner.py
           - $(SRCROOT)/../src/mac_dev_clean/sim_prune.py
           - $(SRCROOT)/../src/mac_dev_clean/xcode_sim_prune.py
@@ -77,8 +86,17 @@ targets:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/age.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/cleaner.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/cli.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/deep_scan.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/discovery.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/events.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/executor.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/fsevents.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/index.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/model.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/output.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/policy.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/projects.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/recommendation.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/scanner.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/sim_prune.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/xcode_sim_prune.py
