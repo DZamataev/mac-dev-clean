@@ -128,6 +128,12 @@ Documents, Desktop, and Downloads, so opening the app does not trigger macOS
 folder-access prompts. Project-local DerivedData remains available from the CLI
 with the explicit `--project-derived-data` cleanup option.
 
+Deep Scan is the exception, and only when you ask for it: it walks the whole
+home directory, protected folders included. If macOS denies access to one, the
+scan reports which folder was blocked instead of quietly returning fewer
+results. It also warns when a directory tree is too deep to walk to the bottom,
+so a truncated walk is never mistaken for a clean one.
+
 Build a distributable, ad-hoc-signed app bundle:
 
 ```sh
