@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,10 @@ from typing import Optional, Sequence, Set
 
 from .age import parse_age
 from .cleaner import clean_targets
+from .deep_scan import deep_scan, default_deep_scan_roots
+from .events import EventEmitter
+from .executor import ApplyOutcome, apply_recommendations
+from .index import open_index
 from .output import clean_report_json, render_clean_table, render_scan_table, scan_report_json
 from .scanner import scan
 
@@ -67,6 +72,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_scan(args)
         if args.command == "clean":
             return run_clean(args, parser)
+        if args.command == "deep-scan":
+            return run_deep_scan(args)
+        if args.command == "apply":
+            return run_apply(args, parser)
+        if args.command == "reset-index":
+            return run_reset_index(args)
         if args.command in {None, "interactive"}:
             return run_interactive(args, parser)
     except ValueError as exc:
@@ -246,6 +257,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_scan_options(report_parser)
 
+    deep_parser = subparsers.add_parser(
+        "deep-scan",
+        help="Recursively analyse projects and stream findings as NDJSON events.",
+    )
+    deep_parser.add_argument(
+        "--root",
+        action="append",
+        type=Path,
+        default=[],
+        dest="deep_root",
+        help="Directory to analyse. Defaults to the home directory. Repeatable.",
+    )
+    deep_parser.add_argument("--index", type=Path, default=None, help="Index database path.")
+    deep_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a single summary object instead of streaming NDJSON events.",
+    )
+    deep_parser.add_argument(
+        "--no-fsevents",
+        action="store_true",
+        help="Always perform a full metadata walk instead of an incremental scan.",
+    )
+
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Apply deep-scan recommendations by ID after revalidating them.",
+    )
+    apply_parser.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        dest="recommendation_id",
+        help="Recommendation ID from a deep scan. Repeatable.",
+    )
+    apply_parser.add_argument("--index", type=Path, default=None, help="Index database path.")
+    apply_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be removed."
+    )
+    apply_parser.add_argument("--json", action="store_true", help="Print JSON output.")
+
+    reset_parser = subparsers.add_parser(
+        "reset-index",
+        help="Delete the local deep-scan index. The next deep scan rebuilds it.",
+    )
+    reset_parser.add_argument("--index", type=Path, default=None, help="Index database path.")
+
     return parser
 
 
@@ -340,6 +398,81 @@ def run_interactive(args: argparse.Namespace, parser: argparse.ArgumentParser) -
     results = clean_targets(targets)
     print(render_clean_table(results))
     return 1 if any(result.error for result in results) else 0
+
+
+def run_deep_scan(args: argparse.Namespace) -> int:
+    roots = list(args.deep_root) or default_deep_scan_roots(Path.home())
+    if not roots:
+        print("No readable scan roots were found.", file=sys.stderr)
+        return 1
+
+    index = open_index(args.index)
+    try:
+        emitter = None if args.json else EventEmitter(sys.stdout, generation=0)
+        result = deep_scan(
+            roots,
+            index,
+            emitter=emitter,
+            use_fsevents=not args.no_fsevents,
+        )
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "cancelled": result.cancelled,
+                        "incremental": result.incremental,
+                        "reclaimable_bytes": result.reclaimable_bytes,
+                        "count": len(result.recommendations),
+                        "recommendations": [
+                            item.to_dict() for item in result.recommendations
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+    finally:
+        index.close()
+    return 0
+
+
+def run_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if not args.recommendation_id:
+        parser.error("apply requires at least one --id")
+
+    index = open_index(args.index)
+    try:
+        results = apply_recommendations(
+            args.recommendation_id, index, dry_run=args.dry_run
+        )
+    finally:
+        index.close()
+
+    if args.json:
+        print(
+            json.dumps(
+                {"results": [item.to_dict() for item in results]},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        for item in results:
+            detail = " — {}".format(item.error) if item.error else ""
+            print("{:<20} {}{}".format(item.outcome.value, item.path, detail))
+
+    failed = any(item.outcome is ApplyOutcome.FAILED for item in results)
+    return 1 if failed else 0
+
+
+def run_reset_index(args: argparse.Namespace) -> int:
+    index = open_index(args.index)
+    try:
+        index.reset()
+    finally:
+        index.close()
+    print("Deep scan index cleared.")
+    return 0
 
 
 def announce_scan_start(include_node_modules: bool) -> None:
