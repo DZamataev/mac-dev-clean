@@ -15,7 +15,6 @@ from .recommendation import (
     Evidence,
     Recommendation,
     RestorationCost,
-    normalized_path,
 )
 
 SCHEMA_VERSION = 1
@@ -211,6 +210,36 @@ def _connect(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _read_schema_version(path: Path) -> Optional[int]:
+    """Read the stored schema version without mutating it.
+
+    Returns None when the file, its meta table, or the schema_version row is
+    missing, or when the file cannot be read as a database at all. Always
+    closes its connection on every path, including failure: like `_connect`,
+    `sqlite3.connect()` succeeds even against a corrupt file because the
+    database is opened lazily, so the failure surfaces on the first
+    statement rather than on connect.
+    """
+    try:
+        connection = sqlite3.connect(str(path))
+    except (sqlite3.DatabaseError, OSError):
+        return None
+    try:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except (sqlite3.DatabaseError, OSError):
+        return None
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def open_index(path: Optional[Path] = None) -> ScanIndex:
     """Open the index, rebuilding it whenever it is corrupt or outdated.
 
@@ -219,19 +248,23 @@ def open_index(path: Optional[Path] = None) -> ScanIndex:
     """
     target = Path(path) if path is not None else DEFAULT_INDEX_PATH.expanduser()
     target = target.expanduser()
-    try:
-        connection = _connect(target)
-        row = connection.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone()
-        if row is not None and int(row[0]) == SCHEMA_VERSION:
-            return ScanIndex(connection, target)
-        connection.close()
-    except (sqlite3.DatabaseError, ValueError, OSError):
-        pass
+
+    if target.exists():
+        # Decide from the version on disk BEFORE `_connect` gets a chance to
+        # overwrite it with the current one -- that overwrite is exactly what
+        # made the old-schema rebuild path unreachable.
+        version = _read_schema_version(target)
+        if version is None or version != SCHEMA_VERSION:
+            try:
+                target.unlink()
+            except OSError:
+                pass
 
     try:
-        target.unlink()
-    except OSError:
-        pass
-    return ScanIndex(_connect(target), target)
+        return ScanIndex(_connect(target), target)
+    except (sqlite3.DatabaseError, ValueError, OSError):
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        return ScanIndex(_connect(target), target)

@@ -137,6 +137,12 @@ class ScanIndexTests(unittest.TestCase):
             rebuilt.close()
 
     def test_an_older_schema_is_rebuilt(self):
+        generation = self.index.begin_generation(self.volume, event_id=100)
+        item = build_recommendation(generation)
+        self.index.record_recommendation(item)
+        self.index.commit_batch()
+        self.index.complete_generation()
+
         self.index.execute_for_test(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION - 1),)
         )
@@ -145,6 +151,12 @@ class ScanIndexTests(unittest.TestCase):
         rebuilt = open_index(self.path)
         try:
             self.assertEqual(rebuilt.schema_version(), SCHEMA_VERSION)
+            # A real rebuild discards the old database file (and everything in
+            # it), rather than merely patching the version number back onto
+            # the still-intact old tables. Assert the old data is gone -- this
+            # is the part a vacuous version-only check cannot catch.
+            self.assertIsNone(rebuilt.snapshot())
+            self.assertIsNone(rebuilt.load_recommendation(item.id))
         finally:
             rebuilt.close()
 
