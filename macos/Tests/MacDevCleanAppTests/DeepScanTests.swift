@@ -128,3 +128,103 @@ private func item(id: String, bytes: Int64, selected: Bool) -> RecommendationIte
         lastActivityAt: nil
     )
 }
+
+@MainActor
+@Test func appModelStreamsDeepScanEventsIntoState() async {
+    let events: [DeepScanEvent] = [
+        .started(roots: ["/Users/test/home"], incremental: false),
+        .candidateFound(item(id: "a", bytes: 500, selected: true)),
+        .candidateFound(item(id: "b", bytes: 200, selected: false)),
+        .completed(reclaimableBytes: 700, count: 2),
+    ]
+    let model = AppModel(
+        backend: EmptyCleanupBackend(),
+        deepScanBackend: StubDeepScanBackend(events: events, applyResults: [])
+    )
+
+    await model.startDeepScan()
+
+    #expect(model.deepScanState.items.count == 2)
+    #expect(model.deepScanState.selectedIds == ["a"])
+    #expect(!model.deepScanState.isRunning)
+    #expect(model.deepScanState.selectedBytes == 500)
+}
+
+@MainActor
+@Test func appModelReportsPartialApplyFailures() async {
+    let events: [DeepScanEvent] = [
+        .started(roots: ["/Users/test/home"], incremental: false),
+        .candidateFound(item(id: "a", bytes: 500, selected: true)),
+        .candidateFound(item(id: "b", bytes: 200, selected: true)),
+        .completed(reclaimableBytes: 700, count: 2),
+    ]
+    let results = [
+        ApplyResultItem(
+            id: "a", label: "node_modules", path: "/Users/test/a/node_modules",
+            reclaimableBytes: 500, size: "500 B", outcome: "removed", dryRun: false, error: ""
+        ),
+        ApplyResultItem(
+            id: "b", label: "node_modules", path: "/Users/test/b/node_modules",
+            reclaimableBytes: 200, size: "200 B", outcome: "changed_since_scan",
+            dryRun: false, error: "the project was edited recently"
+        ),
+    ]
+    let model = AppModel(
+        backend: EmptyCleanupBackend(),
+        deepScanBackend: StubDeepScanBackend(events: events, applyResults: results)
+    )
+
+    await model.startDeepScan()
+    await model.applyDeepScanSelection()
+
+    #expect(model.errorMessage == nil)
+    #expect(model.warningMessage?.contains("edited recently") == true)
+    #expect(model.warningMessage?.contains("1 item was skipped") == true)
+}
+
+@MainActor
+@Test func appModelNeverAppliesAnEmptySelection() async {
+    let backend = StubDeepScanBackend(events: [], applyResults: [])
+    let model = AppModel(backend: EmptyCleanupBackend(), deepScanBackend: backend)
+
+    await model.applyDeepScanSelection()
+
+    #expect(await backend.appliedIds.isEmpty)
+}
+
+private struct EmptyCleanupBackend: CleanupBackendProtocol {
+    func scan() async throws -> ScanReport {
+        ScanReport(
+            totalBytes: 0, total: "0 B", cleanableTotalBytes: 0, cleanableTotal: "0 B",
+            reportOnlyTotalBytes: 0, reportOnlyTotal: "0 B", count: 0, items: []
+        )
+    }
+
+    func clean(flags: [String]) async throws -> CleanReport {
+        CleanReport(totalBytes: 0, total: "0 B", count: 0, items: [])
+    }
+}
+
+private actor RecordedIds {
+    var value: [String] = []
+    func set(_ ids: [String]) { value = ids }
+}
+
+private struct StubDeepScanBackend: DeepScanBackendProtocol {
+    let events: [DeepScanEvent]
+    let applyResults: [ApplyResultItem]
+    private let recorded = RecordedIds()
+
+    var appliedIds: [String] {
+        get async { await recorded.value }
+    }
+
+    func deepScan(onEvent: @Sendable @escaping (DeepScanEvent) -> Void) async throws {
+        for event in events { onEvent(event) }
+    }
+
+    func apply(ids: [String], dryRun: Bool) async throws -> [ApplyResultItem] {
+        await recorded.set(ids)
+        return applyResults
+    }
+}

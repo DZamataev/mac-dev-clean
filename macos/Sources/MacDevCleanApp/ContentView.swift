@@ -2,6 +2,7 @@ import SwiftUI
 
 enum SidebarPage: String, CaseIterable, Identifiable {
     case cleanup = "Cleanup"
+    case deepScan = "Deep Scan"
     case review = "Review Only"
     case about = "About"
 
@@ -9,6 +10,7 @@ enum SidebarPage: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .cleanup: "sparkles"
+        case .deepScan: "magnifyingglass.circle"
         case .review: "archivebox"
         case .about: "info.circle"
         }
@@ -34,6 +36,12 @@ struct ContentView: View {
             Group {
                 if page == .about {
                     AboutView()
+                } else if page == .deepScan {
+                    VStack(spacing: 0) {
+                        header
+                        Divider()
+                        DeepScanView()
+                    }
                 } else {
                     VStack(spacing: 0) {
                         header
@@ -47,7 +55,7 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 640)
         .toolbar {
             ToolbarItemGroup {
-                if page != .about {
+                if page != .about && page != .deepScan {
                     Button {
                         Task { await model.scan() }
                     } label: {
@@ -195,7 +203,7 @@ struct ContentView: View {
                 ReviewOnlyView()
             case .cleanup, .none:
                 CleanupGroupsView()
-            case .about:
+            case .deepScan, .about:
                 EmptyView()
             }
         }
@@ -492,5 +500,135 @@ struct MessageBanner: View {
         }
         .padding(10)
         .background(color.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct DeepScanView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var showsConfirmation = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            controls
+            Divider()
+            if model.deepScanState.items.isEmpty {
+                emptyState
+            } else {
+                List {
+                    ForEach(model.deepScanState.items) { item in
+                        row(for: item)
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .confirmationDialog(
+            "Remove selected project artifacts?",
+            isPresented: $showsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove \(model.deepScanState.selectedIds.count) Item(s)", role: .destructive) {
+                Task { await model.applyDeepScanSelection() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This removes \(model.deepScanSelectionSummary) of build output and dependencies. "
+                + "Source files, manifests, and lock files are never touched. "
+                + "Close Xcode, Android Studio, and any running build first."
+            )
+        }
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                if model.deepScanState.isRunning {
+                    Button("Cancel Scan") { model.cancelDeepScan() }
+                } else {
+                    Button("Start Deep Scan") {
+                        Task { await model.startDeepScan() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                Button("Remove Selected") { showsConfirmation = true }
+                    .disabled(model.isBusy || model.deepScanState.selectedIds.isEmpty)
+                Spacer()
+                Text("Selected: \(model.deepScanSelectionSummary)")
+                    .font(.callout.monospacedDigit())
+            }
+
+            if model.deepScanState.isRunning {
+                ProgressView()
+                    .controlSize(.small)
+                Text(model.deepScanState.currentPath)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            if model.deepScanState.wasCancelled {
+                Text("Scan cancelled. Partial results are shown and were not saved for cleanup.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            ForEach(model.deepScanState.warnings) { warning in
+                Text("\(warning.message) \(warning.path)")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding()
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Text("No project artifacts analysed yet.")
+                .foregroundStyle(.secondary)
+            Text("Deep Scan looks for Git projects that have not changed in 90 days.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func row(for item: RecommendationItem) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Toggle(
+                isOn: Binding(
+                    get: { model.deepScanState.selectedIds.contains(item.id) },
+                    set: { _ in model.toggleDeepScanItem(item.id) }
+                )
+            ) {
+                EmptyView()
+            }
+            .labelsHidden()
+            .disabled(model.isBusy)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.label)
+                    .font(.headline)
+                Text(item.displayPath)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(item.reason)
+                    .font(.caption)
+                Text(item.restorationSummary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text(item.size)
+                .font(.callout.monospacedDigit())
+        }
+        .padding(.vertical, 4)
     }
 }
