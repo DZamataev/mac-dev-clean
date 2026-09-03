@@ -143,6 +143,26 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(outcome, ApplyOutcome.FAILED)
         self.assertTrue(precious.exists(), "data outside the project must survive")
 
+    def test_a_linked_package_inside_the_artifact_loses_only_its_link(self):
+        # `npm link` / `pip install -e` leave a symlink INSIDE the artifact that
+        # points at a real sibling checkout. Removing the artifact must unlink it,
+        # never follow it: the sibling's sources are somebody's actual work.
+        sibling = self.home / "other-project"
+        touch(sibling / "src" / "lib.ts", OLD, b"REAL SOURCE")
+        link = self.artifact / "linked-pkg"
+        os.symlink(str(sibling), str(link))
+        os.utime(str(link), (OLD.timestamp(), OLD.timestamp()), follow_symlinks=False)
+
+        results = apply_recommendations([self.item.id], self.index, now=NOW)
+
+        self.assertEqual(results[0].outcome, ApplyOutcome.REMOVED)
+        self.assertFalse(self.artifact.exists())
+        self.assertTrue(
+            (sibling / "src" / "lib.ts").exists(),
+            "a linked-in project must survive removal of the artifact",
+        )
+        self.assertEqual((sibling / "src" / "lib.ts").read_bytes(), b"REAL SOURCE")
+
     def test_a_missing_path_is_skipped_rather_than_failed(self):
         for child in list(self.artifact.iterdir()):
             if child.is_dir():
