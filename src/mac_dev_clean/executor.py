@@ -9,7 +9,12 @@ from typing import Callable, Dict, List, Optional, Sequence
 from .cleaner import _remove_path
 from .index import ScanIndex
 from .model import human_bytes
-from .projects import INACTIVITY_DAYS, RECIPES, last_meaningful_activity
+from .projects import (
+    INACTIVITY_DAYS,
+    RECIPES,
+    artifact_recent_activity,
+    last_meaningful_activity,
+)
 from .recommendation import ActionKind, Recommendation, normalized_path
 
 RECIPES_BY_ID = {recipe.detector_id: recipe for recipe in RECIPES}
@@ -111,8 +116,22 @@ def _revalidate(item: Recommendation, now: datetime) -> ApplyResult:
     activity = last_meaningful_activity(root, now=now)
     if activity is None:
         return fail(ApplyOutcome.CHANGED_SINCE_SCAN, "project activity is unknown")
-    if activity >= now - timedelta(days=INACTIVITY_DAYS):
+    threshold = now - timedelta(days=INACTIVITY_DAYS)
+    if activity >= threshold:
         return fail(ApplyOutcome.CHANGED_SINCE_SCAN, "the project was edited recently")
+
+    # The source-tree activity check above deliberately excludes generated
+    # directories like this artifact, so a file hand-edited today inside it
+    # (a patch-package fix, a `pip install -e`, a locally patched gem) would
+    # otherwise be invisible right up until deletion. This is the check that
+    # actually prevents deletion: re-derive it from the live filesystem
+    # rather than trusting whatever the index recorded at scan time.
+    artifact_activity = artifact_recent_activity(path, threshold)
+    if artifact_activity is not None:
+        return fail(
+            ApplyOutcome.CHANGED_SINCE_SCAN,
+            "the artifact itself was edited recently",
+        )
 
     return ApplyResult(
         recommendation_id=item.id,

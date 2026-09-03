@@ -5,12 +5,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mac_dev_clean.discovery import Repository, RepositoryKind
+from mac_dev_clean.policy import recommend
 from mac_dev_clean.projects import (
     INACTIVITY_DAYS,
     ArtifactKind,
     analyze_repository,
     last_meaningful_activity,
 )
+from mac_dev_clean.recommendation import Confidence
 
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
 OLD = NOW - timedelta(days=400)
@@ -296,6 +298,111 @@ class NativeRecipeTests(unittest.TestCase):
             venv = [item for item in facts if item.recipe.detector_id == "python-venv"]
 
             self.assertTrue(venv[0].lock_satisfied)
+
+
+class ArtifactRecencyTests(unittest.TestCase):
+    # The activity signal that drives preselection must be blind about the
+    # *source tree* only being allowed to skip generated directories; it must
+    # never be blind about the artifact itself. A file hand-edited today
+    # inside node_modules/.venv/vendor/bundle (a patch-package fix, a
+    # `pip install -e`, a locally patched gem) has to keep that specific
+    # artifact out of default selection, even though the surrounding project
+    # looks abandoned.
+    def test_a_fresh_file_inside_node_modules_keeps_the_artifact_active(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "package.json", OLD, b"{}")
+            touch(root / "pnpm-lock.yaml", OLD)
+            touch(root / "node_modules" / "leftpad" / "index.js", OLD, BIG)
+            # A patch-package-style hand fix landed inside node_modules today.
+            touch(root / "node_modules" / "leftpad" / "patched.js", NOW)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            node = next(f for f in facts if f.recipe.detector_id == "node-modules")
+
+            self.assertFalse(
+                node.inactive,
+                "node_modules containing a file edited today must not be "
+                "reported inactive, even though the project source is old",
+            )
+
+    def test_a_fresh_file_inside_a_python_venv_keeps_the_artifact_active(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "pyproject.toml", OLD)
+            touch(root / "uv.lock", OLD)
+            touch(root / ".venv" / "lib" / "site.py", OLD, BIG)
+            # e.g. `pip install -e .` writing an egg-link/pth file today.
+            touch(root / ".venv" / "lib" / "editable_install.pth", NOW)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            venv = next(f for f in facts if f.recipe.detector_id == "python-venv")
+
+            self.assertFalse(
+                venv.inactive,
+                "a .venv touched today must not be reported inactive",
+            )
+
+    def test_a_fresh_file_inside_vendor_bundle_keeps_the_artifact_active(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "Gemfile", OLD)
+            touch(root / "Gemfile.lock", OLD)
+            touch(root / "vendor" / "bundle" / "gems" / "foo" / "lib.rb", OLD, BIG)
+            # A hand-patched gem landed inside vendor/bundle today.
+            touch(root / "vendor" / "bundle" / "gems" / "foo" / "patched.rb", NOW)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            gem = next(f for f in facts if f.recipe.detector_id == "ruby-bundle")
+
+            self.assertFalse(
+                gem.inactive,
+                "vendor/bundle containing a file edited today must not be "
+                "reported inactive",
+            )
+
+    def test_a_genuinely_abandoned_node_modules_is_still_inactive(self):
+        # No-regression: when the artifact is exactly as old as everything
+        # else, it must still be reported inactive and still preselected.
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "package.json", OLD, b"{}")
+            touch(root / "pnpm-lock.yaml", OLD)
+            touch(root / "node_modules" / "leftpad" / "index.js", OLD, BIG)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            node = next(f for f in facts if f.recipe.detector_id == "node-modules")
+
+            self.assertTrue(node.inactive)
+
+            item = recommend(node, generation=1, now=NOW)
+            self.assertTrue(item.selected_by_default)
+            self.assertEqual(item.confidence, Confidence.STRONG)
+
+    def test_a_fresh_node_modules_is_not_preselected_by_policy(self):
+        # End-to-end analyzer + policy: the recommendation must not be
+        # offered as STRONG/preselected when the artifact itself is fresh.
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary(root)
+            touch(root / "src" / "main.ts", OLD)
+            touch(root / "package.json", OLD, b"{}")
+            touch(root / "pnpm-lock.yaml", OLD)
+            touch(root / "node_modules" / "leftpad" / "index.js", OLD, BIG)
+            touch(root / "node_modules" / "leftpad" / "patched.js", NOW)
+
+            facts = analyze_repository(primary(root), now=NOW)
+            node = next(f for f in facts if f.recipe.detector_id == "node-modules")
+            item = recommend(node, generation=1, now=NOW)
+
+            self.assertFalse(item.selected_by_default)
+            self.assertNotEqual(item.confidence, Confidence.STRONG)
 
 
 class SafetyTests(unittest.TestCase):

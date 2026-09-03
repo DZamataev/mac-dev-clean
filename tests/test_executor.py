@@ -78,6 +78,20 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(results[0].outcome, ApplyOutcome.CHANGED_SINCE_SCAN)
         self.assertTrue(self.artifact.exists())
 
+    def test_a_hand_edited_file_inside_the_artifact_blocks_the_deletion(self):
+        # The ship-blocking data-loss defect: a file hand-edited today
+        # *inside* node_modules (a patch-package fix, a vendored local fork)
+        # must survive `apply` even though the project source around it is
+        # 400 days old and the stale index entry says REMOVE. The index is
+        # only ever a hint; the live filesystem is authoritative.
+        touch(self.artifact / "leftpad" / "hand_patched.js", NOW)
+
+        results = apply_recommendations([self.item.id], self.index, now=NOW)
+
+        self.assertEqual(results[0].outcome, ApplyOutcome.CHANGED_SINCE_SCAN)
+        self.assertTrue(self.artifact.exists())
+        self.assertTrue((self.artifact / "leftpad" / "hand_patched.js").exists())
+
     def test_a_path_replaced_by_a_symlink_is_refused(self):
         elsewhere = self.home / "elsewhere"
         elsewhere.mkdir()

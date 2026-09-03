@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 from .discovery import Repository
 from .recommendation import RestorationCost
@@ -226,17 +226,17 @@ def _is_generated_file(name: str) -> bool:
     return name.endswith(GENERATED_FILE_SUFFIXES)
 
 
-def last_meaningful_activity(
-    repo_path: Path, now: Optional[datetime] = None
-) -> Optional[datetime]:
-    """Newest mtime among files that represent human work on the project.
+def _walk_files(
+    root: Path, exclude_dir_names: frozenset = frozenset()
+) -> Iterator[os.DirEntry]:
+    """Yield every non-symlink file entry beneath `root`.
 
-    Generated directories, Git internals, editor state, and log files are
-    excluded, so a nightly CI build or a stray `.DS_Store` cannot make a
-    long-abandoned project look active.
+    Shared traversal core: directories whose name is in `exclude_dir_names`
+    are pruned from the walk entirely (never descended into or yielded from).
+    Symlinks -- both files and directories -- are never followed or yielded,
+    matching every other safety check in this module.
     """
-    newest = 0.0
-    stack = [repo_path]
+    stack = [root]
     while stack:
         current = stack.pop()
         try:
@@ -249,20 +249,79 @@ def last_meaningful_activity(
                 if entry.is_symlink():
                     continue
                 if entry.is_dir(follow_symlinks=False):
-                    if entry.name not in GENERATED_DIR_NAMES:
+                    if entry.name not in exclude_dir_names:
                         stack.append(Path(entry.path))
                     continue
-                if _is_generated_file(entry.name):
-                    continue
-                mtime = entry.stat(follow_symlinks=False).st_mtime
+                yield entry
             except OSError:
                 continue
-            if mtime > newest:
-                newest = mtime
+
+
+def last_meaningful_activity(
+    repo_path: Path, now: Optional[datetime] = None
+) -> Optional[datetime]:
+    """Newest mtime among files that represent human work on the project.
+
+    Generated directories, Git internals, editor state, and log files are
+    excluded, so a nightly CI build or a stray `.DS_Store` cannot make a
+    long-abandoned project look active.
+
+    This is a signal about the *source tree*, not about any one artifact:
+    `GENERATED_DIR_NAMES` is pruned here on purpose. Callers that need to
+    know whether a specific artifact directory (e.g. `node_modules`) has
+    itself been touched must use `artifact_recent_activity` instead --
+    that function walks the artifact with nothing excluded.
+    """
+    newest = 0.0
+    for entry in _walk_files(repo_path, GENERATED_DIR_NAMES):
+        if _is_generated_file(entry.name):
+            continue
+        try:
+            mtime = entry.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue
+        if mtime > newest:
+            newest = mtime
 
     if newest <= 0:
         return None
     return datetime.fromtimestamp(newest, timezone.utc)
+
+
+def artifact_recent_activity(
+    artifact_path: Path, threshold: datetime
+) -> Optional[datetime]:
+    """Return an mtime at or after `threshold` found among the files inside
+    `artifact_path`, or None if nothing that recent exists.
+
+    This is the artifact-level recency check: `last_meaningful_activity`
+    deliberately excludes directories like `node_modules`, `.venv`, and
+    `vendor` from the *source tree's* activity signal, which means a file
+    hand-edited today inside one of those directories (a patch-package fix,
+    a `pip install -e`, a locally patched gem) is otherwise invisible. Before
+    an artifact is offered for deletion -- or deleted -- its own contents
+    must be checked directly.
+
+    Not the true maximum mtime: this returns as soon as one qualifying entry
+    is found, because only a yes/no judgement is needed. Nothing is excluded
+    from this walk (unlike `last_meaningful_activity`): every file inside the
+    artifact counts, because the whole artifact is what would be deleted.
+
+    Directory mtimes are deliberately not consulted: a directory's own mtime
+    only reflects direct entries being added/removed/renamed, which is
+    already implied by (and less precise than) the mtimes of the files that
+    change lead to, so checking it separately would add noise without adding
+    coverage.
+    """
+    threshold_ts = threshold.timestamp()
+    for entry in _walk_files(artifact_path):
+        try:
+            mtime = entry.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue
+        if mtime >= threshold_ts:
+            return datetime.fromtimestamp(mtime, timezone.utc)
+    return None
 
 
 def _first_existing(root: Path, names: Tuple[str, ...]) -> Optional[str]:
@@ -339,6 +398,23 @@ def analyze_repository(
         if size < MIN_ARTIFACT_BYTES:
             continue
 
+        # The source-tree activity signal deliberately excludes generated
+        # directories like this artifact, so a file hand-edited today inside
+        # it (a patch-package fix, a `pip install -e`, a locally patched
+        # gem) would otherwise be invisible. Check the artifact itself: if
+        # anything inside it is newer than the inactivity threshold, the
+        # artifact is not stale, regardless of how old the surrounding
+        # project looks.
+        artifact_inactive = inactive
+        artifact_activity = activity
+        if inactive:
+            threshold = moment - timedelta(days=INACTIVITY_DAYS)
+            recent = artifact_recent_activity(artifact, threshold)
+            if recent is not None:
+                artifact_inactive = False
+                if artifact_activity is None or recent > artifact_activity:
+                    artifact_activity = recent
+
         facts.append(
             ArtifactFact(
                 repository=repository,
@@ -349,8 +425,8 @@ def analyze_repository(
                 lock_satisfied=lock_satisfied,
                 lock_detail="{} exists".format(lock) if lock else "no supported lock file",
                 manifest_detail="{} exists".format(manifest or marker or recipe.relative_path),
-                last_activity_at=activity,
-                inactive=inactive,
+                last_activity_at=artifact_activity,
+                inactive=artifact_inactive,
             )
         )
     return facts

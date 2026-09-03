@@ -369,6 +369,17 @@ recommendation is revalidated against the live filesystem before anything is
 removed: if the lock file disappeared or the project was edited in the
 meantime, the item is refused rather than deleted.
 
+Staleness is judged on the artifact itself, not only on the surrounding
+project. Deep Scan's 90-day inactivity window deliberately ignores generated
+directories like `node_modules`, `.venv`, and `vendor` when it looks at a
+project's *source*, so those directories can never fake staleness for the
+project around them. But before an artifact from one of those directories is
+offered or removed, Deep Scan separately checks whether anything inside the
+artifact itself has changed recently. A hand-patched file inside a dependency
+or build directory — a `patch-package` fix, an editable install, a locally
+patched vendored gem — keeps that specific artifact out of preselection and
+out of `apply`, even when the rest of the project looks abandoned.
+
 Recommendations are identified by opaque IDs rather than raw paths. `apply`
 looks the ID up in the local index to find the authoritative path, then
 re-checks that path directly on disk before deleting anything — so an ID that
