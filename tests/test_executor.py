@@ -1,4 +1,5 @@
 import os
+import shutil
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -105,6 +106,42 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(results[0].outcome, ApplyOutcome.FAILED)
         self.assertIn("symlink", results[0].error)
         self.assertTrue(elsewhere.exists())
+
+    def test_an_artifact_reached_through_an_ancestor_symlink_is_refused(self):
+        # The executor's own guard, isolated: the project is honest at scan time
+        # (real ios/build inside it), so a valid recommendation ID exists. Only
+        # AFTERWARDS is the ancestor `ios` swapped for a symlink to outside
+        # storage. The leaf `build` stays a genuine directory, so `islink` on the
+        # target sees nothing wrong -- only the realpath containment check does.
+        home = self.home
+        project = home / "ios-app"
+        (project / ".git").mkdir(parents=True)
+        touch(project / ".git" / "HEAD", OLD)
+        touch(project / "src" / "main.swift", OLD)
+        touch(project / "ios" / "App.xcodeproj" / "project.pbxproj", OLD, b"{}")
+        touch(project / "ios" / "build" / "Release" / "app.bin", OLD, BIG)
+
+        index = open_index(home / "ios-index.sqlite3")
+        try:
+            result = deep_scan([home], index, now=NOW, use_fsevents=False)
+            item = next(
+                i for i in result.recommendations if i.detector_id == "ios-build"
+            )
+
+            # Swap the ancestor for a symlink to data that lives outside.
+            outside = home / "external_storage"
+            touch(outside / "App.xcodeproj" / "project.pbxproj", OLD, b"{}")
+            precious = outside / "build" / "Release" / "keepme.bin"
+            touch(precious, OLD, BIG)
+            shutil.rmtree(str(project / "ios"))
+            os.symlink(str(outside), str(project / "ios"))
+
+            outcome = apply_recommendations([item.id], index, now=NOW)[0].outcome
+        finally:
+            index.close()
+
+        self.assertEqual(outcome, ApplyOutcome.FAILED)
+        self.assertTrue(precious.exists(), "data outside the project must survive")
 
     def test_a_missing_path_is_skipped_rather_than_failed(self):
         for child in list(self.artifact.iterdir()):
