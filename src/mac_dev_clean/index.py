@@ -195,12 +195,16 @@ def _decode(payload: dict) -> Recommendation:
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
-    connection.executescript(_SCHEMA)
-    connection.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
-    connection.commit()
+    try:
+        connection.executescript(_SCHEMA)
+        connection.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        connection.commit()
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
