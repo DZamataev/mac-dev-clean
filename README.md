@@ -395,9 +395,10 @@ preselected, and applying one recommendation never affects any other project.
 
 The index lives at `~/Library/Caches/mac-dev-clean/index.sqlite3` and is purely
 a cache. It stores paths, sizes, and timestamps — never file contents — and is
-never sent anywhere. Deep Scan uses FSEvents to rescan incrementally when
-possible and safely falls back to a full walk whenever the event history is
-incomplete.
+never sent anywhere. Every Deep Scan currently performs a full walk. The scan
+reports whether FSEvents history was complete enough to have skipped unchanged
+directories, which is the groundwork for incremental rescans in a later
+release; today that flag changes nothing about how much is scanned.
 
 ## What It Scans
 

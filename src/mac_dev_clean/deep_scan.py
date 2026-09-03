@@ -30,6 +30,9 @@ COMMIT_EVERY = 20
 class DeepScanResult:
     recommendations: List[Recommendation] = field(default_factory=list)
     cancelled: bool = False
+    #: Whether FSEvents history was complete enough that an incremental walk
+    #: WOULD have been safe. Reporting only: the walk is always full today, so
+    #: do not read this as "less was scanned".
     incremental: bool = False
     reclaimable_bytes: int = 0
 
