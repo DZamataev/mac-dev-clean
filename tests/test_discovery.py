@@ -4,7 +4,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mac_dev_clean.discovery import (
-    Repository,
     RepositoryKind,
     classify_git_entry,
     discover_repositories,

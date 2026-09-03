@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mac_dev_clean.fsevents import VolumeIdentity
-from mac_dev_clean.index import SCHEMA_VERSION, ScanIndex, open_index
+from mac_dev_clean.index import SCHEMA_VERSION, open_index
 from mac_dev_clean.recommendation import (
     ActionKind,
     Confidence,
