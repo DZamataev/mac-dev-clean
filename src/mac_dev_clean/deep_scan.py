@@ -23,6 +23,10 @@ from .recommendation import Recommendation, normalized_path
 PROTECTED_FOLDER_NAMES = ("Desktop", "Documents", "Downloads")
 
 PROGRESS_EVERY = 25
+
+#: How many unreadable folders to name individually before summarising. Naming
+#: every one turns a permissions problem into an unreadable wall of text.
+UNREADABLE_REPORT_LIMIT = 5
 COMMIT_EVERY = 20
 
 
@@ -153,6 +157,8 @@ def deep_scan(
     scanned = 0
     pending = 0
     cancelled = False
+    depth_limited = 0
+    unreadable = 0
 
     def _cancelled() -> bool:
         return should_cancel is not None and should_cancel()
@@ -173,23 +179,33 @@ def deep_scan(
             if emitter is not None and scanned % PROGRESS_EVERY == 0:
                 emitter.progress(path=path, scanned=scanned)
 
+        # Both of these fire per directory, and a single tool cache can trip the
+        # depth limit thousands of times. The user needs to know a limit was hit
+        # once, with an example -- not one line per directory, which floods the
+        # UI and buries every real finding.
         def _on_depth_limit(path: Path) -> None:
+            nonlocal depth_limited
             if emitter is None:
                 return
-            emitter.warning(
-                "Stopped descending at {0} levels; anything deeper was not "
-                "scanned.".format(MAX_DEPTH),
-                path=normalized_path(path),
-            )
+            depth_limited += 1
+            if depth_limited == 1:
+                emitter.warning(
+                    "Stopped descending at {0} levels; anything deeper was not "
+                    "scanned.".format(MAX_DEPTH),
+                    path=normalized_path(path),
+                )
 
         def _on_unreadable(path: Path) -> None:
+            nonlocal unreadable
             if emitter is None:
                 return
-            emitter.warning(
-                "Could not read this folder, so anything inside it was not "
-                "scanned.",
-                path=normalized_path(path),
-            )
+            unreadable += 1
+            if unreadable <= UNREADABLE_REPORT_LIMIT:
+                emitter.warning(
+                    "Could not read this folder, so anything inside it was not "
+                    "scanned.",
+                    path=normalized_path(path),
+                )
 
         for repository in discover_repositories(
             [root],
@@ -227,6 +243,19 @@ def deep_scan(
             break
 
     index.commit_batch()
+
+    # Collapsing the per-directory warnings above would otherwise hide how much
+    # was skipped, so report the totals once at the end.
+    if emitter is not None:
+        if depth_limited > 1:
+            emitter.warning(
+                "{0} folders were deeper than {1} levels and were not fully "
+                "scanned.".format(depth_limited, MAX_DEPTH)
+            )
+        if unreadable > UNREADABLE_REPORT_LIMIT:
+            emitter.warning(
+                "{0} folders could not be read and were skipped.".format(unreadable)
+            )
 
     if cancelled:
         index.abandon_generation()

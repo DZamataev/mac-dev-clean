@@ -79,6 +79,50 @@ class DeepScanTests(unittest.TestCase):
             "a truncated walk must tell the user, not silently report nothing",
         )
 
+    def test_a_tool_cache_is_never_walked(self):
+        # ~/.cache and friends hold ~200k directories of downloaded dependencies
+        # on a working machine. A checkout in there is somebody else's project.
+        cached = self.home / ".cache" / "uv" / "archive-v0" / "some-package"
+        build_stale_project(cached)
+        mine = self.home / "projects" / "app"
+        expected = build_stale_project(mine)
+
+        result = deep_scan([self.home], self.index, now=NOW, use_fsevents=False)
+
+        paths = {item.path for item in result.recommendations}
+        self.assertIn(expected, paths)
+        self.assertFalse(
+            any(".cache" in str(path) for path in paths),
+            "a dependency cache must never yield deletion candidates",
+        )
+
+    def test_repeated_depth_limits_collapse_into_one_warning_and_a_total(self):
+        # A single tool cache can trip the limit thousands of times. One line per
+        # directory floods the UI and buries every real finding.
+        from mac_dev_clean.discovery import MAX_DEPTH
+
+        for index in range(4):
+            deep = self.home / "cache{0}".format(index)
+            for level in range(MAX_DEPTH + 2):
+                deep = deep / "level{0}".format(level)
+            deep.mkdir(parents=True)
+
+        stream = io.StringIO()
+        emitter = EventEmitter(stream, generation=-1)
+        deep_scan(
+            [self.home], self.index, now=NOW, use_fsevents=False, emitter=emitter
+        )
+
+        warnings = [
+            json.loads(line)
+            for line in stream.getvalue().splitlines()
+            if line.strip() and json.loads(line)["event"] == "warning"
+        ]
+        examples = [w for w in warnings if "Stopped descending" in w["message"]]
+        totals = [w for w in warnings if "were deeper than" in w["message"]]
+        self.assertEqual(len(examples), 1, "only one example line should be emitted")
+        self.assertEqual(len(totals), 1, "the total must still be reported")
+
     def test_an_unreadable_folder_warns_instead_of_vanishing(self):
         # A folder we cannot read contributes nothing, which is indistinguishable
         # from "nothing to clean in there" unless we say so. Covers any name and

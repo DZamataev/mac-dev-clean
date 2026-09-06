@@ -34,6 +34,21 @@ PRUNED_DIR_NAMES = frozenset(
         ".tox",
         ".next",
         ".nuxt",
+        # Tool caches: enormous, deeply nested, and a checkout inside one is a
+        # downloaded dependency rather than a project of the user's own. Walking
+        # them costs ~200k directories on a working machine and finds nothing.
+        ".cache",
+        ".npm",
+        ".yarn",
+        ".pnpm-store",
+        ".gradle",
+        ".m2",
+        ".cargo",
+        ".rustup",
+        ".pub-cache",
+        ".cocoapods",
+        ".bun",
+        ".deno",
         "Library",
         "Applications",
         ".Spotlight-V100",
