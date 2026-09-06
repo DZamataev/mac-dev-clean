@@ -128,6 +128,12 @@ Documents, Desktop, and Downloads, so opening the app does not trigger macOS
 folder-access prompts. Project-local DerivedData remains available from the CLI
 with the explicit `--project-derived-data` cleanup option.
 
+Deep Scan is the exception, and only when you ask for it: it walks the whole
+home directory, protected folders included. If macOS denies access to one, the
+scan reports which folder was blocked instead of quietly returning fewer
+results. It also warns when a directory tree is too deep to walk to the bottom,
+so a truncated walk is never mistaken for a clean one.
+
 Build a distributable, ad-hoc-signed app bundle:
 
 ```sh
@@ -341,6 +347,58 @@ Search specific roots for `node_modules`:
 mac-dev-clean scan --search-root ~/Code --search-root ~/Projects
 mac-dev-clean clean --node-modules --older-than 90d --search-root ~/Code
 ```
+
+### Deep Scan (project artifacts)
+
+Deep Scan finds Git repositories anywhere under your home folder and offers the
+reproducible artifacts of projects that have not changed in 90 days. Source
+files, manifests, lock files, and `.git` are never deletion targets.
+
+```sh
+# Stream findings as newline-delimited JSON events
+mac-dev-clean deep-scan
+
+# Print one summary object instead
+mac-dev-clean deep-scan --json
+
+# Preview, then apply a specific recommendation
+mac-dev-clean apply --id <id> --dry-run
+mac-dev-clean apply --id <id>
+
+# Discard the local index; the next deep scan rebuilds it
+mac-dev-clean reset-index
+```
+
+A dependency tree is only preselected when its lock file is present, so it can
+be restored exactly. Build outputs are preselected on inactivity alone. Every
+recommendation is revalidated against the live filesystem before anything is
+removed: if the lock file disappeared or the project was edited in the
+meantime, the item is refused rather than deleted.
+
+Staleness is judged on the artifact itself, not only on the surrounding
+project. Deep Scan's 90-day inactivity window deliberately ignores generated
+directories like `node_modules`, `.venv`, and `vendor` when it looks at a
+project's *source*, so those directories can never fake staleness for the
+project around them. But before an artifact from one of those directories is
+offered or removed, Deep Scan separately checks whether anything inside the
+artifact itself has changed recently. A hand-patched file inside a dependency
+or build directory — a `patch-package` fix, an editable install, a locally
+patched vendored gem — keeps that specific artifact out of preselection and
+out of `apply`, even when the rest of the project looks abandoned.
+
+Recommendations are identified by opaque IDs rather than raw paths. `apply`
+looks the ID up in the local index to find the authoritative path, then
+re-checks that path directly on disk before deleting anything — so an ID that
+no longer matches live, safe evidence never deletes anything. Nothing that
+touches source files, manifests, lock files, `.git`, or worktree roots is ever
+preselected, and applying one recommendation never affects any other project.
+
+The index lives at `~/Library/Caches/mac-dev-clean/index.sqlite3` and is purely
+a cache. It stores paths, sizes, and timestamps — never file contents — and is
+never sent anywhere. Every Deep Scan currently performs a full walk. The scan
+reports whether FSEvents history was complete enough to have skipped unchanged
+directories, which is the groundwork for incremental rescans in a later
+release; today that flag changes nothing about how much is scanned.
 
 ## What It Scans
 

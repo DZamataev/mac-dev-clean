@@ -8,12 +8,16 @@ final class AppModel: ObservableObject {
         case idle
         case scanning
         case cleaning
+        case deepScanning
+        case applying
 
         var message: String {
             switch self {
             case .idle: "Ready"
             case .scanning: "Scanning developer storage…"
             case .cleaning: "Cleaning selected categories…"
+            case .deepScanning: "Analysing projects…"
+            case .applying: "Removing selected project artifacts…"
             }
         }
     }
@@ -21,25 +25,34 @@ final class AppModel: ObservableObject {
     @Published private(set) var report: ScanReport?
     @Published private(set) var diskSpace: DiskSpace?
     @Published private(set) var activity: Activity = .idle
+    @Published private(set) var deepScanState = DeepScanState()
     @Published var selectedFlags: Set<String> = []
     @Published var errorMessage: String?
     @Published var warningMessage: String?
     @Published var noticeMessage: String?
 
     private let backend: (any CleanupBackendProtocol)?
+    private let deepScanBackend: (any DeepScanBackendProtocol)?
     private let startupError: Error?
+    private var deepScanTask: Task<Void, Never>?
 
-    init(backend: (any CleanupBackendProtocol)? = nil) {
+    init(
+        backend: (any CleanupBackendProtocol)? = nil,
+        deepScanBackend: (any DeepScanBackendProtocol)? = nil
+    ) {
         diskSpace = try? DiskSpace.current()
         if let backend {
             self.backend = backend
+            self.deepScanBackend = deepScanBackend
             startupError = nil
         } else {
             do {
                 self.backend = try CleanupBackend()
+                self.deepScanBackend = deepScanBackend ?? (try? DeepScanBackend())
                 startupError = nil
             } catch {
                 self.backend = nil
+                self.deepScanBackend = nil
                 startupError = error
             }
         }
@@ -150,6 +163,114 @@ final class AppModel: ObservableObject {
             refreshDiskSpace()
             activity = .idle
         }
+    }
+
+    var deepScanSelectionSummary: String {
+        ByteFormatter.string(deepScanState.selectedBytes)
+    }
+
+    func toggleDeepScanItem(_ id: String) {
+        deepScanState.toggle(id)
+    }
+
+    func startDeepScan() async {
+        await startDeepScan(preservingMessages: false)
+    }
+
+    /// Mirrors the existing `scan(preservingMessages:)` pattern: the rescan that
+    /// follows a cleanup must not wipe the warning describing what was skipped.
+    private func startDeepScan(preservingMessages: Bool) async {
+        guard !isBusy, let deepScanBackend else { return }
+
+        activity = .deepScanning
+        if !preservingMessages {
+            dismissMessage()
+        }
+        deepScanState.reset()
+
+        // `self` is captured once, immutably, before the Task is formed. Capturing
+        // the @MainActor model directly inside the @Sendable event callback would
+        // be a concurrency error under Swift 6 strict checking.
+        let task = Task { @MainActor [self] in
+            let stream = AsyncStream<DeepScanEvent> { continuation in
+                // Kept detached (rather than a plain, MainActor-inheriting `Task {}`)
+                // so the blocking Process/Pipe I/O in `deepScan` never runs on the
+                // main actor's executor. Detached tasks do not inherit cancellation,
+                // so `onTermination` below is what actually propagates it: cancelling
+                // the outer `deepScanTask` cancels this stream's iteration, which
+                // fires `onTermination`, which cancels `inner`, which is what
+                // `deepScanBackend.deepScan`'s `withTaskCancellationHandler` observes.
+                let inner = Task.detached {
+                    do {
+                        try await deepScanBackend.deepScan { event in
+                            continuation.yield(event)
+                        }
+                    } catch {
+                        // The terminal event never arrived; `isRunning` is cleared
+                        // when the stream finishes below.
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { @Sendable _ in
+                    inner.cancel()
+                }
+            }
+            for await event in stream {
+                deepScanState.apply(event)
+            }
+        }
+        deepScanTask = task
+        await task.value
+        deepScanTask = nil
+        activity = .idle
+        refreshDiskSpace()
+    }
+
+    func cancelDeepScan() {
+        deepScanTask?.cancel()
+        deepScanTask = nil
+    }
+
+    func applyDeepScanSelection() async {
+        guard !isBusy, let deepScanBackend else { return }
+        let ids = deepScanState.items
+            .filter { deepScanState.selectedIds.contains($0.id) }
+            .map(\.id)
+        guard !ids.isEmpty else { return }
+
+        activity = .applying
+        dismissMessage()
+        do {
+            let results = try await deepScanBackend.apply(ids: ids, dryRun: false)
+            let failures = results.filter { !$0.succeeded }
+            if failures.isEmpty {
+                let removed = results.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
+                noticeMessage = "Removed \(ByteFormatter.string(removed)) across \(results.count) location(s)."
+            } else {
+                warningMessage = Self.applyWarning(for: results)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        activity = .idle
+        refreshDiskSpace()
+        await startDeepScan(preservingMessages: true)
+    }
+
+    static func applyWarning(for results: [ApplyResultItem]) -> String? {
+        let failures = results.filter { !$0.succeeded }
+        guard !failures.isEmpty else { return nil }
+
+        let removed = results.filter(\.succeeded)
+        let removedBytes = removed.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
+        let itemWord = failures.count == 1 ? "item was" : "items were"
+        let success = removed.isEmpty
+            ? "Nothing was removed."
+            : "Removed \(ByteFormatter.string(removedBytes)) across \(removed.count) location(s)."
+        let details = failures.map { "• \($0.label): \($0.error)\n  \($0.path)" }
+            .joined(separator: "\n")
+
+        return "\(failures.count) \(itemWord) skipped. \(success) No additional files were removed.\n\n\(details)"
     }
 
     func selectAll() {

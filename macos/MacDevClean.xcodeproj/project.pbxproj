@@ -9,16 +9,19 @@
 /* Begin PBXBuildFile section */
 		07B989EA731F080ACF7B5660 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FB0C1A26CD553D8B98C60FF /* AppModel.swift */; };
 		084778E0523E221526834A90 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CCAA44421685885637FCEE8 /* ContentView.swift */; };
-		3ABD1BBA7B7ED0DEA8CA3DAA /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = E6910769539D2B91EA7C3414 /* LICENSE */; };
+		1F0BFF73738C42A8678DD6A6 /* mac-dev-clean-logo.png in Resources */ = {isa = PBXBuildFile; fileRef = 1E62DDFA9A150DA64E6E5EF4 /* mac-dev-clean-logo.png */; };
+		2CF58BBE2E4F00452C7036B4 /* DeepScanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFFBE0351345662C851A1935 /* DeepScanTests.swift */; };
+		2FAFB3AA99343072B4552FE7 /* raven-vector-dark.png in Resources */ = {isa = PBXBuildFile; fileRef = 15057FB60AC86CFC8B943BA7 /* raven-vector-dark.png */; };
 		471559FF3A502EBBE2A230FA /* ModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24C10CDD9C7DCB79567282E1 /* ModelTests.swift */; };
-		4B523DE68C2B7E00B0E59B51 /* raven-vector-dark-trans.png in Resources */ = {isa = PBXBuildFile; fileRef = 753C19C40473BFED38118EE9 /* raven-vector-dark-trans.png */; };
-		5B0FFFC4125E606E22CF1669 /* raven-vector-dark.png in Resources */ = {isa = PBXBuildFile; fileRef = F949198D7517F916F78D1A5C /* raven-vector-dark.png */; };
-		64016BFD0BFAFC177C109DB8 /* mac-dev-clean-logo.png in Resources */ = {isa = PBXBuildFile; fileRef = BE5468581F43DFF47C84FEB2 /* mac-dev-clean-logo.png */; };
+		54F968737B5442E0582F1850 /* BRANDING.md in Resources */ = {isa = PBXBuildFile; fileRef = 2506D666CF72BFD7033ADCF1 /* BRANDING.md */; };
+		5B68871C2AEB0A59B2C89715 /* DeepScanModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 658648A859A0E70ED68A5C8A /* DeepScanModels.swift */; };
 		779945226F2B5F48931596A8 /* MacDevCleanApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 611A386D3BFBC22F5FFAB41C /* MacDevCleanApp.swift */; };
 		7E487615C68D3C80551FEE30 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24F1CCAB5B17153BFAEB31CC /* Models.swift */; };
-		A6E759F9352948A9FDB8C25E /* BRANDING.md in Resources */ = {isa = PBXBuildFile; fileRef = E39B9169C02F626865BB52A1 /* BRANDING.md */; };
 		BA0DC952F36F4B61723ABF62 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = ED62B12B17721DCF8C516203 /* AppIcon.icns */; };
 		C65D3F290CD653FF2DEF39C2 /* Backend.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF2562FDADAF86D24061C54C /* Backend.swift */; };
+		CFA555121D4D35D47AE9ACA1 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 37681A30747EEB50984BA656 /* LICENSE */; };
+		EF23A895AFAAFD62AF91FA16 /* raven-vector-dark-trans.png in Resources */ = {isa = PBXBuildFile; fileRef = 6329D3008A251A3A1FCE12C5 /* raven-vector-dark-trans.png */; };
+		F4E3BA04F7394AC52611EA84 /* DeepScanBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4852C592A6D05212139C8E89 /* DeepScanBackend.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -33,25 +36,29 @@
 
 /* Begin PBXFileReference section */
 		0FB0C1A26CD553D8B98C60FF /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		15057FB60AC86CFC8B943BA7 /* raven-vector-dark.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "raven-vector-dark.png"; sourceTree = "<group>"; };
 		1CFB2FD0EDEDD854CC609696 /* MacDevCleanAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacDevCleanAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1E62DDFA9A150DA64E6E5EF4 /* mac-dev-clean-logo.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "mac-dev-clean-logo.png"; sourceTree = "<group>"; };
 		24C10CDD9C7DCB79567282E1 /* ModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelTests.swift; sourceTree = "<group>"; };
 		24F1CCAB5B17153BFAEB31CC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		2506D666CF72BFD7033ADCF1 /* BRANDING.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BRANDING.md; sourceTree = "<group>"; };
+		37681A30747EEB50984BA656 /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
+		4852C592A6D05212139C8E89 /* DeepScanBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepScanBackend.swift; sourceTree = "<group>"; };
 		611A386D3BFBC22F5FFAB41C /* MacDevCleanApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacDevCleanApp.swift; sourceTree = "<group>"; };
-		753C19C40473BFED38118EE9 /* raven-vector-dark-trans.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "raven-vector-dark-trans.png"; sourceTree = "<group>"; };
+		6329D3008A251A3A1FCE12C5 /* raven-vector-dark-trans.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "raven-vector-dark-trans.png"; sourceTree = "<group>"; };
+		658648A859A0E70ED68A5C8A /* DeepScanModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepScanModels.swift; sourceTree = "<group>"; };
 		7DFCAE7ADB932C66BB6BB6B6 /* mac-dev-clean.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "mac-dev-clean.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		8CCAA44421685885637FCEE8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		BE5468581F43DFF47C84FEB2 /* mac-dev-clean-logo.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "mac-dev-clean-logo.png"; sourceTree = "<group>"; };
 		CF2562FDADAF86D24061C54C /* Backend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Backend.swift; sourceTree = "<group>"; };
-		E39B9169C02F626865BB52A1 /* BRANDING.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BRANDING.md; sourceTree = "<group>"; };
-		E6910769539D2B91EA7C3414 /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		ED62B12B17721DCF8C516203 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
-		F949198D7517F916F78D1A5C /* raven-vector-dark.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "raven-vector-dark.png"; sourceTree = "<group>"; };
+		EFFBE0351345662C851A1935 /* DeepScanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepScanTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
 		583FFBEA3F4FD020606FDE7B /* MacDevCleanAppTests */ = {
 			isa = PBXGroup;
 			children = (
+				EFFBE0351345662C851A1935 /* DeepScanTests.swift */,
 				24C10CDD9C7DCB79567282E1 /* ModelTests.swift */,
 			);
 			path = MacDevCleanAppTests;
@@ -65,24 +72,21 @@
 			path = AppBundle;
 			sourceTree = "<group>";
 		};
-		6A7103290A0C48DF674DF0F5 /* assets */ = {
+		685C3FBDD0F23FCEF7CF5CD1 /* assets */ = {
 			isa = PBXGroup;
 			children = (
-				BE5468581F43DFF47C84FEB2 /* mac-dev-clean-logo.png */,
+				1E62DDFA9A150DA64E6E5EF4 /* mac-dev-clean-logo.png */,
 			);
 			path = assets;
 			sourceTree = "<group>";
 		};
-		795B3CF58A4EC696073635DF /* mac-dev-clean */ = {
+		7AC7F7AC98CDA77A755E81F3 /* raven_vector_logos */ = {
 			isa = PBXGroup;
 			children = (
-				E39B9169C02F626865BB52A1 /* BRANDING.md */,
-				E6910769539D2B91EA7C3414 /* LICENSE */,
-				6A7103290A0C48DF674DF0F5 /* assets */,
-				CACF81BE34E6A69D4F48E005 /* raven_vector_logos */,
+				6329D3008A251A3A1FCE12C5 /* raven-vector-dark-trans.png */,
+				15057FB60AC86CFC8B943BA7 /* raven-vector-dark.png */,
 			);
-			name = "mac-dev-clean";
-			path = ..;
+			path = raven_vector_logos;
 			sourceTree = "<group>";
 		};
 		926A61DE564274453E55B1C3 /* Products */ = {
@@ -102,20 +106,11 @@
 			path = Tests;
 			sourceTree = "<group>";
 		};
-		CACF81BE34E6A69D4F48E005 /* raven_vector_logos */ = {
-			isa = PBXGroup;
-			children = (
-				753C19C40473BFED38118EE9 /* raven-vector-dark-trans.png */,
-				F949198D7517F916F78D1A5C /* raven-vector-dark.png */,
-			);
-			path = raven_vector_logos;
-			sourceTree = "<group>";
-		};
 		D1E14F1AEC2EA2F94FFFD3BB = {
 			isa = PBXGroup;
 			children = (
 				6271B2A237B148D44C65E4EB /* AppBundle */,
-				795B3CF58A4EC696073635DF /* mac-dev-clean */,
+				DE045FC85BBF74E08B9CDEDF /* mac-dev-clean */,
 				D451FE5888CCEA20A1449E5A /* Sources */,
 				C8EC1707B39BAE52754AEA8C /* Tests */,
 				926A61DE564274453E55B1C3 /* Products */,
@@ -136,10 +131,24 @@
 				0FB0C1A26CD553D8B98C60FF /* AppModel.swift */,
 				CF2562FDADAF86D24061C54C /* Backend.swift */,
 				8CCAA44421685885637FCEE8 /* ContentView.swift */,
+				4852C592A6D05212139C8E89 /* DeepScanBackend.swift */,
+				658648A859A0E70ED68A5C8A /* DeepScanModels.swift */,
 				611A386D3BFBC22F5FFAB41C /* MacDevCleanApp.swift */,
 				24F1CCAB5B17153BFAEB31CC /* Models.swift */,
 			);
 			path = MacDevCleanApp;
+			sourceTree = "<group>";
+		};
+		DE045FC85BBF74E08B9CDEDF /* mac-dev-clean */ = {
+			isa = PBXGroup;
+			children = (
+				2506D666CF72BFD7033ADCF1 /* BRANDING.md */,
+				37681A30747EEB50984BA656 /* LICENSE */,
+				685C3FBDD0F23FCEF7CF5CD1 /* assets */,
+				7AC7F7AC98CDA77A755E81F3 /* raven_vector_logos */,
+			);
+			name = "mac-dev-clean";
+			path = ..;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -225,11 +234,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				BA0DC952F36F4B61723ABF62 /* AppIcon.icns in Resources */,
-				A6E759F9352948A9FDB8C25E /* BRANDING.md in Resources */,
-				3ABD1BBA7B7ED0DEA8CA3DAA /* LICENSE in Resources */,
-				64016BFD0BFAFC177C109DB8 /* mac-dev-clean-logo.png in Resources */,
-				4B523DE68C2B7E00B0E59B51 /* raven-vector-dark-trans.png in Resources */,
-				5B0FFFC4125E606E22CF1669 /* raven-vector-dark.png in Resources */,
+				54F968737B5442E0582F1850 /* BRANDING.md in Resources */,
+				CFA555121D4D35D47AE9ACA1 /* LICENSE in Resources */,
+				1F0BFF73738C42A8678DD6A6 /* mac-dev-clean-logo.png in Resources */,
+				EF23A895AFAAFD62AF91FA16 /* raven-vector-dark-trans.png in Resources */,
+				2FAFB3AA99343072B4552FE7 /* raven-vector-dark.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -249,8 +258,17 @@
 				"$(SRCROOT)/../src/mac_dev_clean/age.py",
 				"$(SRCROOT)/../src/mac_dev_clean/cleaner.py",
 				"$(SRCROOT)/../src/mac_dev_clean/cli.py",
+				"$(SRCROOT)/../src/mac_dev_clean/deep_scan.py",
+				"$(SRCROOT)/../src/mac_dev_clean/discovery.py",
+				"$(SRCROOT)/../src/mac_dev_clean/events.py",
+				"$(SRCROOT)/../src/mac_dev_clean/executor.py",
+				"$(SRCROOT)/../src/mac_dev_clean/fsevents.py",
+				"$(SRCROOT)/../src/mac_dev_clean/index.py",
 				"$(SRCROOT)/../src/mac_dev_clean/model.py",
 				"$(SRCROOT)/../src/mac_dev_clean/output.py",
+				"$(SRCROOT)/../src/mac_dev_clean/policy.py",
+				"$(SRCROOT)/../src/mac_dev_clean/projects.py",
+				"$(SRCROOT)/../src/mac_dev_clean/recommendation.py",
 				"$(SRCROOT)/../src/mac_dev_clean/scanner.py",
 				"$(SRCROOT)/../src/mac_dev_clean/sim_prune.py",
 				"$(SRCROOT)/../src/mac_dev_clean/xcode_sim_prune.py",
@@ -264,8 +282,17 @@
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/age.py",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/cleaner.py",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/cli.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/deep_scan.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/discovery.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/events.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/executor.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/fsevents.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/index.py",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/model.py",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/output.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/policy.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/projects.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/recommendation.py",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/scanner.py",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/sim_prune.py",
 				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/xcode_sim_prune.py",
@@ -284,6 +311,8 @@
 				07B989EA731F080ACF7B5660 /* AppModel.swift in Sources */,
 				C65D3F290CD653FF2DEF39C2 /* Backend.swift in Sources */,
 				084778E0523E221526834A90 /* ContentView.swift in Sources */,
+				F4E3BA04F7394AC52611EA84 /* DeepScanBackend.swift in Sources */,
+				5B68871C2AEB0A59B2C89715 /* DeepScanModels.swift in Sources */,
 				779945226F2B5F48931596A8 /* MacDevCleanApp.swift in Sources */,
 				7E487615C68D3C80551FEE30 /* Models.swift in Sources */,
 			);
@@ -293,6 +322,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2CF58BBE2E4F00452C7036B4 /* DeepScanTests.swift in Sources */,
 				471559FF3A502EBBE2A230FA /* ModelTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
