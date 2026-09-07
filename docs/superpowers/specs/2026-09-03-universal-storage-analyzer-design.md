@@ -69,6 +69,15 @@ Local model stores (`~/.ollama`, Hugging Face) are large and look cache-shaped
 but are not regenerable without a deliberate multi-gigabyte redownload, and the
 user may have no network budget for it. They are review-only, never cleanable.
 
+The same survey measured a category that did not exist when this design was
+first approved: coding-agent artifacts. `~/.codex`, `~/.hermes`, `~/.claude`,
+and agent-created worktrees hold 9.5 GiB between them, and repository-local
+agent scratch under `<repo>/tmp` a further 4.2 GiB. The Agent Artifact
+Analyzer section below classifies these; the short version is that the
+repository scratch is the largest and safest target because its regeneration
+contract is documented and checkable, while the transcripts that dominate the
+agent home directories are personal history and stay review-only.
+
 The current scanner has two constraints that prevent it from explaining this storage well:
 
 1. fixed locations and a small number of glob patterns dominate discovery;
@@ -101,6 +110,8 @@ Adding `~/dev` as another conventional root would help this one machine but woul
 9. Starting, waking, or installing an external tool in order to inventory it.
 10. Deleting locally downloaded model weights, which cannot be regenerated without a large redownload the user may be unable to afford.
 11. Making a path actionable because the user browsed to it in the Tree Explorer.
+12. Deleting an agent's task transcripts, thread history, or live state, or reclaiming space inside another program's database.
+13. Treating an agent's home directory as a single cleanable unit.
 
 ## Design Principles
 
@@ -215,6 +226,7 @@ Initial analyzers:
 - `DownloadsAnalyzer`
 - `ApplicationAnalyzer`
 - `CacheAnalyzer`
+- `AgentArtifactAnalyzer`
 - `SimulatorAnalyzer`
 - `DockerAnalyzer`
 - `HomebrewAnalyzer`
@@ -225,7 +237,7 @@ Analyzers are registered explicitly. There is no general rule that turns an arbi
 
 Analyzers fall into two acquisition styles:
 
-- **Filesystem analyzers** (`ProjectAnalyzer`, `DownloadsAnalyzer`, `ApplicationAnalyzer`, `CacheAnalyzer`, `TreeExplorer`) measure paths directly.
+- **Filesystem analyzers** (`ProjectAnalyzer`, `DownloadsAnalyzer`, `ApplicationAnalyzer`, `CacheAnalyzer`, `AgentArtifactAnalyzer`, `TreeExplorer`) measure paths directly.
 - **Tool-managed analyzers** (`SimulatorAnalyzer`, `DockerAnalyzer`, `HomebrewAnalyzer`, `AndroidAnalyzer`) ask the owning tool for its inventory and never measure or delete its internal paths.
 
 A tool-managed analyzer must satisfy the same contract:
@@ -542,6 +554,97 @@ are never selected:
 - `~/.codex/sessions` and other assistant task history already reported today;
 - application-managed state under `Application Support`, `Containers`, and `Group Containers`.
 
+## Agent Artifact Analyzer
+
+Coding agents are now a large and fast-growing storage category that no existing
+analyzer explains. A metadata-only survey on 2026-09-07 measured, on the
+development machine:
+
+| Location | Measured | Contents |
+|---|---|---|
+| `~/.codex` | 3.8 GiB | 1.6 GiB task transcripts, 1.1 GiB `logs_2.sqlite`, 257 MiB thread history, 321 MiB plugins |
+| `~/.hermes` | 3.4 GiB | 2.7 GiB is the installed program itself |
+| `~/.claude` | 730 MiB | 711 MiB of per-project transcripts across 1313 files |
+| `<repo>/tmp` | 4.2 GiB | agent scratch, largest single directory 2.2 GiB |
+| `~/orca/workspaces` | 827 MiB | agent-created Git worktrees |
+
+An agent's home directory is not a cache. A single one mixes regenerable logs,
+personal task history, installed plugins, and live state, so the whole
+directory is never a unit of cleanup. Each path is classified on its own
+evidence, exactly as everywhere else in this design.
+
+### Repository scratch directories
+
+A `tmp` directory at a repository root is the one agent artifact with a
+*documented* regeneration contract: the convention, stated in the repositories
+that use it, is that `tmp/` is the only scratch location, is gitignored, and
+holds nothing that survives a task.
+
+That contract is checked rather than assumed. A repository `tmp` directory is
+cleanable only when all of the following hold:
+
+- it sits directly at a discovered repository root;
+- Git reports its contents as ignored;
+- it contains no tracked file other than a placeholder such as `.gitkeep`;
+- individual entries older than 30 days are offered; newer ones are left alone, because a running build or a live dev-server log belongs to work in progress.
+
+The placeholder itself is never removed: the repositories that use this
+convention commit `.gitkeep` precisely so the directory survives. Cleanup is
+per-entry, never `delete_tree` on `tmp` itself.
+
+A `tmp` directory that is tracked by Git, or that holds tracked files beyond a
+placeholder, is not scratch. It is source, and it is protected.
+
+### Dead per-project transcript directories
+
+Claude stores per-project transcripts in directories whose names encode the
+project path with `/` and `.` both replaced by `-`. That encoding is lossy and
+**must not be reversed by naive substitution**: `-Users-example-dev-ff-game`
+decodes equally to `/Users/example/dev/ff/game` and `/Users/example/dev/ff-game`,
+and `--claude-worktrees` decodes to `/.claude/worktrees`. A naive replacement
+reported live projects as missing during the survey.
+
+The rule is therefore evidence-based and deliberately conservative:
+
+1. enumerate every candidate path by treating each `-` as `/`, `-`, or `.`;
+2. test each candidate for existence;
+3. exactly one existing candidate means the project is live: **protected**;
+4. zero existing candidates means the project is gone: **cleanable**;
+5. more than one existing candidate is ambiguous: **review only**, never cleaned;
+6. a candidate set too large to enumerate is review only.
+
+Under this rule the survey found 6 genuinely dead directories totalling 98 MiB —
+removed worktrees and one deleted repository — while correctly protecting 13
+live ones.
+
+### Review-only agent storage
+
+Task transcripts are a record of the user's own work, not a cache. They are
+reported with size and age so the user can act, and are never cleanable and
+never selected:
+
+- `~/.codex/sessions`, `~/.codex/thread_history_*.sqlite`, `~/.codex/archived_sessions`;
+- `~/.claude/projects` directories that resolve to a live or ambiguous path;
+- `~/.hermes/state.db` and equivalent live agent state;
+- agent-created Git worktrees such as those under `~/orca/workspaces`, which are tool-managed through Git and covered by the worktree rules above.
+
+Agent log databases such as `~/.codex/logs_2.sqlite` are review-only for a
+further reason: the file cannot be deleted without destroying live state, and
+reclaiming space inside it would mean running `VACUUM` against another
+program's database. That is tool-managed storage for which no owning tool
+exposes a preview command, so this design offers inventory only.
+
+Installed agent programs, plugins, and skills — `~/.hermes/hermes-agent`,
+`~/.codex/plugins`, `~/.claude/plugins` — are protected. They are installed
+software, not artifacts.
+
+### Agent scratch outside the home directory
+
+Agents also leave small files in `$TMPDIR`: shell snapshots and session marker
+files written with a recognizable prefix. These follow the same narrow rules as
+the bundler caches above — inside the resolved `$TMPDIR` only, matching a
+declared prefix, owned by the current user, older than 7 days.
+
 ## Tool-managed Analyzers
 
 ### Simulator
@@ -706,11 +809,12 @@ Order result sections by expected benefit:
 
 1. Recommended Cleanup
 2. Old Projects
-3. Downloads
-4. Unused and Duplicate Applications
-5. Tool-managed Storage
-6. Needs Review
-7. Explore Disk
+3. Agent Artifacts
+4. Downloads
+5. Unused and Duplicate Applications
+6. Tool-managed Storage
+7. Needs Review
+8. Explore Disk
 
 Within a group, sort by estimated reclaimable size. Applications additionally support last-used sorting and explicit one-year/unknown groups.
 
@@ -722,6 +826,13 @@ Docker daemon must not read as "Docker uses no space".
 
 Explore Disk hosts the Tree Explorer. It is a navigation surface, not a result
 list: nothing in it is selectable and it contributes nothing to the totals.
+
+Agent Artifacts groups by owning agent, and within an agent separates
+regenerable scratch from personal history, so a row that offers deletion never
+sits visually beside one that must not be deleted. Repository scratch is listed
+per repository with its entry count and age spread. Transcript and live-state
+rows state plainly that they are the user's own history and carry no
+selection control at all — only size, age, and Reveal in Finder.
 
 Every row shows:
 
@@ -805,6 +916,8 @@ After execution, rescan only affected paths and refresh disk-space totals. Repor
 - External tools are invoked only to inventory or act on their own state. Their output is parsed locally and is never forwarded anywhere.
 - The audit journal is local, append-only, and contains local paths. It is never uploaded, and it is excluded from any diagnostic bundle unless the user explicitly chooses to share it. Clearing the journal is available from the UI and CLI.
 - The Tree Explorer reads directory metadata only. It never opens file contents.
+- Agent task transcripts are read for size, name, and timestamp only. Their contents — prompts, code, and conversation — are never parsed, indexed, hashed, or displayed.
+- Deciding whether an agent transcript directory is dead uses only the directory's own name and the existence of candidate paths. No transcript is opened to answer that question.
 
 ## Testing Strategy
 
@@ -822,6 +935,8 @@ After execution, rescan only affected paths and refresh disk-space totals. Repor
 - `pubspec.yaml` with a `flutter` dependency, with `sdk: flutter`, and a Dart-only package with neither;
 - `pom.xml` with a readable `artifactId` and one that fails to parse;
 - Gradle module detection with and without a `settings.gradle` ancestor inside the same repository;
+- the agent transcript-directory decoder: a name resolving to exactly one existing path, to zero, to two existing paths, one containing a literal hyphen, one containing an encoded dot, and one long enough to exceed the enumeration ceiling;
+- repository `tmp` classification: ignored contents with only `.gitkeep` tracked, a tracked file beyond the placeholder, a `tmp` directory that Git does not ignore, and entries either side of the 30-day boundary;
 - external-tool output parsing: `docker system df --format '{{json .}}'` lines including a `0B` reclaimable class and a percentage suffix; `brew cleanup -n` output containing `Warning:` lines, `Would remove:` lines, and the total line; `sdkmanager --list_installed` output with its progress prefix; `avdmanager list avd` output with both a loadable device and a "could not be loaded" entry;
 - audit journal record shape for each terminal outcome, including dry runs and refusals.
 
@@ -841,6 +956,8 @@ After execution, rescan only affected paths and refresh disk-space totals. Repor
 - a stopped or absent external tool yields `unavailable` and never a scan failure or a start prompt;
 - `~/Library/Application Support/JetBrains` is never offered while `~/Library/Caches/JetBrains` is;
 - a `$TMPDIR` bundler cache newer than 7 days, owned by another user, or outside `$TMPDIR` is refused;
+- an ambiguous agent transcript directory name is never cleaned, and a repository `tmp` holding a tracked file beyond its placeholder is never cleaned;
+- `.gitkeep` survives repository scratch cleanup, and `tmp` itself is never removed;
 - a Tree Explorer node is never actionable, and a browsed path is refused as an action target;
 - a failed and a refused action each produce a journal record, and a journal write failure does not block or reverse the action.
 
@@ -934,14 +1051,15 @@ access, content hashing, and Spotlight metadata for a smaller measured return.
 The journal ships first inside this phase, because `invoke_tool` is the first
 action kind whose effects we cannot re-derive from the filesystem afterwards.
 
-### Phase 3: Expanded Caches and Manifest-derived Recipes
+### Phase 3: Expanded Caches, Manifest-derived Recipes, and Agent Artifacts
 
 - the curated cache table: Yarn classic and Berry, uv, pdm, pipenv, JetBrains caches, NuGet, Playwright, Puppeteer, Electron and electron-builder, CocoaPods cache and repos, Maven, pub, Flutter/Dart, Deno, RubyGems, .NET, LLDB, Android build caches;
 - the "cleanable but never default-selected" rule for offline build inputs;
-- `$TMPDIR` bundler caches under the ownership and 7-day rules;
+- `$TMPDIR` bundler and agent-scratch caches under the ownership and age rules;
 - review-only large stores, including local model directories;
 - the manifest-predicate mechanism plus the React Native, Flutter, Maven, and Gradle-module recipes;
-- documentation and a test for every added location and predicate.
+- the agent artifact analyzer: repository `tmp` scratch under the checked gitignore contract, the ambiguity-safe decoder for dead per-project transcript directories, and review-only classification for transcripts, live state, and agent log databases;
+- documentation and a test for every added location, predicate, and agent rule.
 
 ### Phase 4: Downloads Analyzer
 
