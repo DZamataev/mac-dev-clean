@@ -204,7 +204,43 @@ class SimPruneTests(unittest.TestCase):
         self.assertEqual([device.udid for device in devices], [UNAVAILABLE_UDID])
         self.assertFalse(devices[0].is_available)
 
-    def test_runtime_authorization_requires_boolean_flag_and_string_identifier(self):
+    def test_device_parser_rejects_non_object_containers(self):
+        for payload in ([], {"devices": []}, {"devices": None}):
+            with self.subTest(payload=payload):
+                try:
+                    devices = parse_devices_json(json.dumps(payload))
+                except (AttributeError, TypeError) as exc:
+                    self.fail("malformed device container escaped: {!r}".format(exc))
+                self.assertEqual(devices, [])
+
+    def test_device_parser_skips_malformed_groups_without_hiding_valid_groups(self):
+        raw = json.dumps(
+            {
+                "devices": {
+                    "valid-runtime": [
+                        {
+                            "name": "valid unavailable",
+                            "udid": UNAVAILABLE_UDID,
+                            "state": "Shutdown",
+                            "isAvailable": False,
+                            "dataPathSize": 10,
+                        }
+                    ],
+                    "null-runtime": None,
+                    "scalar-runtime": 7,
+                    "object-runtime": {"not": "a device list"},
+                }
+            }
+        )
+
+        try:
+            devices = parse_devices_json(raw)
+        except TypeError as exc:
+            self.fail("malformed device group hid valid siblings: {!r}".format(exc))
+
+        self.assertEqual([device.udid for device in devices], [UNAVAILABLE_UDID])
+
+    def test_runtime_authorization_requires_present_boolean_deletable_and_string_identifier(self):
         raw = json.dumps(
             {
                 "runtimes": [
@@ -215,7 +251,7 @@ class SimPruneTests(unittest.TestCase):
                         "path": "/valid-current",
                     },
                     {
-                        "identifier": "valid-legacy",
+                        "identifier": "availability-is-not-deletability",
                         "isAvailable": True,
                         "sizeBytes": 20,
                         "path": "/valid-legacy",
@@ -257,10 +293,35 @@ class SimPruneTests(unittest.TestCase):
 
         self.assertEqual(
             [runtime.identifier for runtime in runtimes],
-            ["valid-legacy", "valid-current"],
+            ["valid-current"],
         )
-        self.assertTrue(runtimes[0].deletable)
-        self.assertFalse(runtimes[1].deletable)
+        self.assertFalse(runtimes[0].deletable)
+
+    def test_runtime_parser_rejects_malformed_envelopes_without_inventing_a_resource(self):
+        invented = {
+            "runtimes": {
+                "deletable": True,
+                "sizeBytes": 1,
+                "path": "/invented",
+            }
+        }
+        for payload in (invented, {"runtimes": 7}, {"runtimes": None}):
+            with self.subTest(payload=payload):
+                self.assertEqual(parse_runtime_images_json(json.dumps(payload)), [])
+
+    def test_runtime_parser_rejects_non_object_top_level_and_keeps_legacy_map(self):
+        try:
+            malformed = parse_runtime_images_json("[]")
+        except AttributeError as exc:
+            self.fail("malformed runtime container escaped: {!r}".format(exc))
+
+        legacy = parse_runtime_images_json(RUNTIMES_JSON)
+
+        self.assertEqual(malformed, [])
+        self.assertEqual(
+            [runtime.identifier for runtime in legacy],
+            ["RUNTIME-IMAGE-NEW", "RUNTIME-IMAGE-OLD"],
+        )
 
     def test_devices_omit_malformed_byte_counts_without_hiding_valid_siblings(self):
         records = [

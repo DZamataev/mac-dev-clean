@@ -155,10 +155,16 @@ def remove_runtime_dyld_caches(runner: Runner = run_simctl) -> str:
 
 def parse_devices_json(raw: str) -> List[Device]:
     payload = json.loads(raw or "{}")
+    if not isinstance(payload, dict):
+        return []
     devices_by_runtime = payload.get("devices", {})
+    if not isinstance(devices_by_runtime, dict):
+        return []
     devices: List[Device] = []
 
     for runtime_identifier, runtime_devices in devices_by_runtime.items():
+        if not isinstance(runtime_devices, list):
+            continue
         for item in runtime_devices:
             if not isinstance(item, dict):
                 continue
@@ -188,11 +194,16 @@ def parse_devices_json(raw: str) -> List[Device]:
 
 def parse_runtime_images_json(raw: str) -> List[RuntimeImage]:
     payload = json.loads(raw or "{}")
+    if not isinstance(payload, dict):
+        return []
     entries: Iterable[tuple[object, Dict[str, object]]]
-    if isinstance(payload.get("runtimes"), list):
+    if "runtimes" in payload:
+        runtime_entries = payload.get("runtimes")
+        if not isinstance(runtime_entries, list):
+            return []
         entries = (
             (item.get("identifier"), item)
-            for item in payload.get("runtimes", [])
+            for item in runtime_entries
             if isinstance(item, dict)
         )
     else:
@@ -206,10 +217,7 @@ def parse_runtime_images_json(raw: str) -> List[RuntimeImage]:
     for identifier, item in entries:
         if not isinstance(identifier, str):
             continue
-        if "deletable" in item:
-            deletable = item.get("deletable")
-        else:
-            deletable = item.get("isAvailable")
+        deletable = item.get("deletable")
         if not isinstance(deletable, bool):
             continue
         size_bytes = _byte_count(item.get("sizeBytes"))

@@ -147,7 +147,7 @@ def analyze_simulator(
                 action=ActionKind.INVOKE_TOOL,
                 allocated_bytes=runtime.size_bytes,
                 reclaimable_bytes=runtime.size_bytes,
-                confidence=Confidence.STRONG,
+                confidence=Confidence.HEURISTIC,
                 restoration=RestorationCost.REDOWNLOAD,
                 selected_by_default=False,
                 evidence=tuple(evidence),

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from mac_dev_clean.recommendation import ActionKind
+from mac_dev_clean.recommendation import ActionKind, Confidence
 from mac_dev_clean.sim_prune import SimctlError
 from mac_dev_clean.tools.runner import MAX_STDERR_CHARS, ToolUnavailable
 from mac_dev_clean.tools.simulator import XCRUN, analyze_simulator
@@ -87,6 +87,7 @@ class AnalyzeSimulatorDeviceTests(unittest.TestCase):
         )
         self.assertEqual(item.generation, 7)
         self.assertIs(item.action, ActionKind.INVOKE_TOOL)
+        self.assertIs(item.confidence, Confidence.HEURISTIC)
         self.assertFalse(item.selected_by_default)
         self.assertEqual(
             item.tool_action.argv,
@@ -132,6 +133,7 @@ class AnalyzeSimulatorRuntimeTests(unittest.TestCase):
             runtime.last_activity_at.isoformat(), "2025-01-02T03:04:05+00:00"
         )
         self.assertIs(runtime.action, ActionKind.INVOKE_TOOL)
+        self.assertIs(runtime.confidence, Confidence.HEURISTIC)
         self.assertFalse(runtime.selected_by_default)
         self.assertEqual(
             runtime.tool_action.argv,
@@ -146,6 +148,8 @@ class AnalyzeSimulatorRuntimeTests(unittest.TestCase):
     def test_runtime_must_be_deletable_with_safe_identity_size_and_absolute_path(self):
         unsafe = """{"runtimes": [
           {"identifier":"ok-not-deletable","deletable":false,"sizeBytes":1,"path":"/a"},
+          {"identifier":"available-only","isAvailable":true,"sizeBytes":1,"path":"/available"},
+          {"identifier":"missing-deletable","sizeBytes":1,"path":"/missing"},
           {"identifier":"zero","deletable":true,"sizeBytes":0,"path":"/b"},
           {"identifier":"","deletable":true,"sizeBytes":1,"path":"/c"},
           {"identifier":"bad\\u0000id","deletable":true,"sizeBytes":1,"path":"/d"},
@@ -156,6 +160,20 @@ class AnalyzeSimulatorRuntimeTests(unittest.TestCase):
 
         items, unavailable = analyze_simulator(
             simctl_runner(devices='{"devices": {}}', runtimes=unsafe),
+            generation=1,
+            home=HOME,
+        )
+
+        self.assertIsNone(unavailable)
+        self.assertEqual(items, [])
+
+    def test_malformed_runtime_envelope_cannot_invent_runtimes_resource_action(self):
+        malformed = """{"runtimes": {
+          "deletable": true, "sizeBytes": 1, "path": "/invented"
+        }}"""
+
+        items, unavailable = analyze_simulator(
+            simctl_runner(devices='{"devices": {}}', runtimes=malformed),
             generation=1,
             home=HOME,
         )
