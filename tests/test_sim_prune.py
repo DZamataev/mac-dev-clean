@@ -148,6 +148,214 @@ class SimPruneTests(unittest.TestCase):
         self.assertEqual(devices[0].udid, BOOTED_UDID)
         self.assertEqual(devices[0].total_size_bytes, 120)
 
+    def test_device_authorization_requires_boolean_availability_and_string_udid(self):
+        raw = json.dumps(
+            {
+                "devices": {
+                    "runtime": [
+                        {
+                            "name": "valid unavailable",
+                            "udid": UNAVAILABLE_UDID,
+                            "state": "Shutdown",
+                            "isAvailable": False,
+                            "dataPathSize": 10,
+                        },
+                        {
+                            "name": "string false",
+                            "udid": OLD_UDID,
+                            "state": "Shutdown",
+                            "isAvailable": "false",
+                            "dataPathSize": 20,
+                        },
+                        {
+                            "name": "numeric availability",
+                            "udid": NEVER_UDID,
+                            "state": "Shutdown",
+                            "isAvailable": 0,
+                            "dataPathSize": 30,
+                        },
+                        {
+                            "name": "missing availability",
+                            "udid": BOOTED_UDID,
+                            "state": "Shutdown",
+                            "dataPathSize": 40,
+                        },
+                        {
+                            "name": "numeric udid",
+                            "udid": 1234,
+                            "state": "Shutdown",
+                            "isAvailable": False,
+                            "dataPathSize": 50,
+                        },
+                        {
+                            "name": "null udid",
+                            "udid": None,
+                            "state": "Shutdown",
+                            "isAvailable": False,
+                            "dataPathSize": 60,
+                        },
+                    ]
+                }
+            }
+        )
+
+        devices = parse_devices_json(raw)
+
+        self.assertEqual([device.udid for device in devices], [UNAVAILABLE_UDID])
+        self.assertFalse(devices[0].is_available)
+
+    def test_runtime_authorization_requires_boolean_flag_and_string_identifier(self):
+        raw = json.dumps(
+            {
+                "runtimes": [
+                    {
+                        "identifier": "valid-current",
+                        "deletable": False,
+                        "sizeBytes": 10,
+                        "path": "/valid-current",
+                    },
+                    {
+                        "identifier": "valid-legacy",
+                        "isAvailable": True,
+                        "sizeBytes": 20,
+                        "path": "/valid-legacy",
+                    },
+                    {
+                        "identifier": "string-false",
+                        "deletable": "false",
+                        "sizeBytes": 30,
+                        "path": "/string-false",
+                    },
+                    {
+                        "identifier": "numeric-flag",
+                        "deletable": 1,
+                        "sizeBytes": 40,
+                        "path": "/numeric-flag",
+                    },
+                    {
+                        "identifier": "missing-flag",
+                        "sizeBytes": 50,
+                        "path": "/missing-flag",
+                    },
+                    {
+                        "identifier": None,
+                        "deletable": True,
+                        "sizeBytes": 60,
+                        "path": "/null-id",
+                    },
+                    {
+                        "identifier": 7,
+                        "deletable": True,
+                        "sizeBytes": 70,
+                        "path": "/numeric-id",
+                    },
+                ]
+            }
+        )
+
+        runtimes = parse_runtime_images_json(raw)
+
+        self.assertEqual(
+            [runtime.identifier for runtime in runtimes],
+            ["valid-legacy", "valid-current"],
+        )
+        self.assertTrue(runtimes[0].deletable)
+        self.assertFalse(runtimes[1].deletable)
+
+    def test_devices_omit_malformed_byte_counts_without_hiding_valid_siblings(self):
+        records = [
+            {
+                "name": "valid",
+                "udid": UNAVAILABLE_UDID,
+                "state": "Shutdown",
+                "isAvailable": False,
+                "dataPathSize": 10,
+            }
+        ]
+        malformed_sizes = (
+            True,
+            -1,
+            float("inf"),
+            float("nan"),
+            1.5,
+            "10",
+            None,
+        )
+        for index, size in enumerate(malformed_sizes):
+            records.append(
+                {
+                    "name": "malformed {}".format(index),
+                    "udid": "00000000-0000-0000-0000-{:012d}".format(index),
+                    "state": "Shutdown",
+                    "isAvailable": False,
+                    "dataPathSize": size,
+                }
+            )
+        records.append(
+            {
+                "name": "malformed log",
+                "udid": OLD_UDID,
+                "state": "Shutdown",
+                "isAvailable": False,
+                "dataPathSize": 5,
+                "logPathSize": None,
+            }
+        )
+
+        devices = parse_devices_json(json.dumps({"devices": {"runtime": records}}))
+
+        self.assertEqual([device.udid for device in devices], [UNAVAILABLE_UDID])
+        self.assertEqual(devices[0].total_size_bytes, 10)
+
+    def test_runtimes_require_non_boolean_finite_non_negative_integer_size(self):
+        records = [
+            {
+                "identifier": "valid-positive",
+                "deletable": True,
+                "sizeBytes": 10,
+                "path": "/valid-positive",
+            },
+            {
+                "identifier": "valid-zero",
+                "deletable": False,
+                "sizeBytes": 0,
+                "path": "/valid-zero",
+            },
+        ]
+        malformed_sizes = (
+            True,
+            -1,
+            float("inf"),
+            float("nan"),
+            1.5,
+            "10",
+            None,
+        )
+        for index, size in enumerate(malformed_sizes):
+            records.append(
+                {
+                    "identifier": "malformed-{}".format(index),
+                    "deletable": True,
+                    "sizeBytes": size,
+                    "path": "/malformed-{}".format(index),
+                }
+            )
+        records.append(
+            {
+                "identifier": "missing-size",
+                "deletable": True,
+                "path": "/missing-size",
+            }
+        )
+
+        runtimes = parse_runtime_images_json(json.dumps({"runtimes": records}))
+
+        self.assertEqual(
+            [runtime.identifier for runtime in runtimes],
+            ["valid-positive", "valid-zero"],
+        )
+        self.assertEqual([runtime.size_bytes for runtime in runtimes], [10, 0])
+
     def test_default_unused_devices_only_selects_never_booted_shutdown_devices(self):
         devices = parse_devices_json(DEVICES_JSON)
 

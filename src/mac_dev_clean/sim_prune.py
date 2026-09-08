@@ -160,16 +160,26 @@ def parse_devices_json(raw: str) -> List[Device]:
 
     for runtime_identifier, runtime_devices in devices_by_runtime.items():
         for item in runtime_devices:
+            if not isinstance(item, dict):
+                continue
+            udid = item.get("udid")
+            is_available = item.get("isAvailable")
+            if not isinstance(udid, str) or not isinstance(is_available, bool):
+                continue
+            data_size_bytes = _byte_count(item.get("dataPathSize", 0))
+            log_size_bytes = _byte_count(item.get("logPathSize", 0))
+            if data_size_bytes is None or log_size_bytes is None:
+                continue
             devices.append(
                 Device(
                     runtime_identifier=runtime_identifier,
                     name=str(item.get("name", "")),
-                    udid=str(item.get("udid", "")),
+                    udid=udid,
                     state=str(item.get("state", "")),
-                    is_available=bool(item.get("isAvailable", False)),
+                    is_available=is_available,
                     last_booted_at=parse_simctl_datetime(item.get("lastBootedAt")),
-                    data_size_bytes=int(item.get("dataPathSize", 0) or 0),
-                    log_size_bytes=int(item.get("logPathSize", 0) or 0),
+                    data_size_bytes=data_size_bytes,
+                    log_size_bytes=log_size_bytes,
                 )
             )
 
@@ -178,22 +188,33 @@ def parse_devices_json(raw: str) -> List[Device]:
 
 def parse_runtime_images_json(raw: str) -> List[RuntimeImage]:
     payload = json.loads(raw or "{}")
-    entries: Iterable[tuple[str, Dict[str, object]]]
+    entries: Iterable[tuple[object, Dict[str, object]]]
     if isinstance(payload.get("runtimes"), list):
         entries = (
-            (str(item.get("identifier", "")), item)
+            (item.get("identifier"), item)
             for item in payload.get("runtimes", [])
             if isinstance(item, dict)
         )
     else:
         entries = (
-            (str(identifier), item)
+            (identifier, item)
             for identifier, item in payload.items()
             if isinstance(item, dict)
         )
 
     runtimes: List[RuntimeImage] = []
     for identifier, item in entries:
+        if not isinstance(identifier, str):
+            continue
+        if "deletable" in item:
+            deletable = item.get("deletable")
+        else:
+            deletable = item.get("isAvailable")
+        if not isinstance(deletable, bool):
+            continue
+        size_bytes = _byte_count(item.get("sizeBytes"))
+        if size_bytes is None:
+            continue
         runtime_identifier = str(item.get("runtimeIdentifier") or item.get("identifier") or "")
         bundle_path = str(item.get("runtimeBundlePath") or item.get("bundlePath") or "")
         name = str(item.get("name") or _runtime_name_from_path(bundle_path) or runtime_identifier)
@@ -206,14 +227,20 @@ def parse_runtime_images_json(raw: str) -> List[RuntimeImage]:
                 build=str(item.get("build") or item.get("buildversion") or ""),
                 platform_identifier=str(item.get("platformIdentifier") or item.get("platform") or ""),
                 state=str(item.get("state", "")),
-                deletable=bool(item.get("deletable", item.get("isAvailable", False))),
+                deletable=deletable,
                 last_used_at=parse_simctl_datetime(item.get("lastUsedAt") or _latest_last_usage(item)),
-                size_bytes=int(item.get("sizeBytes", 0) or 0),
+                size_bytes=size_bytes,
                 path=str(item.get("path") or bundle_path),
             )
         )
 
     return sorted(runtimes, key=lambda runtime: runtime.size_bytes, reverse=True)
+
+
+def _byte_count(value: object) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def delete_unavailable(
