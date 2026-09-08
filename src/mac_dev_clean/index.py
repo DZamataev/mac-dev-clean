@@ -175,11 +175,11 @@ def _decode(payload: dict) -> Recommendation:
         ToolAction(
             tool=raw_tool["tool"],
             resource=raw_tool["resource"],
-            argv=tuple(raw_tool["argv"]),
-            preview_argv=tuple(raw_tool["preview_argv"]),
+            argv=raw_tool["argv"],
+            preview_argv=raw_tool["preview_argv"],
             reported=raw_tool.get("reported", ""),
         )
-        if raw_tool
+        if raw_tool is not None
         else None
     )
     return Recommendation(

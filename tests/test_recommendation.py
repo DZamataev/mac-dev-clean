@@ -78,6 +78,29 @@ class RecommendationSerializationTests(unittest.TestCase):
 
         self.assertFalse(item.selected_by_default)
 
+    def test_positional_argument_after_last_activity_remains_warning(self):
+        item = Recommendation(
+            "node-modules",
+            "project-dependencies",
+            "node_modules",
+            Path("/Users/test/app/node_modules"),
+            ActionKind.DELETE_TREE,
+            2048,
+            2048,
+            Confidence.STRONG,
+            RestorationCost.REBUILD,
+            True,
+            (),
+            Path("/Users/test/app"),
+            "",
+            7,
+            None,
+            "Legacy warning",
+        )
+
+        self.assertEqual(item.warning, "Legacy warning")
+        self.assertIsNone(item.tool_action)
+
 
 class ToolActionTests(unittest.TestCase):
     def build_tool_recommendation(self, **overrides):
@@ -137,6 +160,24 @@ class ToolActionTests(unittest.TestCase):
             },
         )
 
+    def test_metadata_fields_must_be_strings(self):
+        from mac_dev_clean.recommendation import ToolAction
+
+        for field in ("tool", "resource", "reported"):
+            values = {
+                "tool": "docker",
+                "resource": "build-cache",
+                "reported": "7.499GB",
+            }
+            values[field] = 7
+            with self.subTest(field=field):
+                with self.assertRaises(TypeError):
+                    ToolAction(
+                        argv=("docker", "builder", "prune"),
+                        preview_argv=("docker", "system", "df"),
+                        **values,
+                    )
+
     def test_argument_sequences_are_normalized_to_tuples(self):
         from mac_dev_clean.recommendation import ToolAction
 
@@ -150,6 +191,23 @@ class ToolActionTests(unittest.TestCase):
         self.assertEqual(action.preview_argv, ("docker", "system", "df"))
         self.assertIsInstance(action.argv, tuple)
         self.assertIsInstance(action.preview_argv, tuple)
+
+    def test_mutating_serialized_vectors_does_not_change_the_action(self):
+        from mac_dev_clean.recommendation import ToolAction
+
+        action = ToolAction(
+            "docker",
+            "build-cache",
+            ("docker", "builder", "prune"),
+            ("docker", "system", "df"),
+        )
+        payload = action.to_dict()
+
+        payload["argv"].append("-f")
+        payload["preview_argv"][0] = "other-tool"
+
+        self.assertEqual(action.argv, ("docker", "builder", "prune"))
+        self.assertEqual(action.preview_argv, ("docker", "system", "df"))
 
     def test_string_and_bytes_argument_vectors_are_rejected(self):
         from mac_dev_clean.recommendation import ToolAction
@@ -167,6 +225,53 @@ class ToolActionTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     ToolAction("docker", "build-cache", **values)
 
+    def test_non_sequence_argument_iterables_are_rejected(self):
+        from mac_dev_clean.recommendation import ToolAction
+
+        valid = ("docker", "system", "df")
+        for field, invalid in (
+            ("argv", iter(("docker", "builder", "prune"))),
+            ("argv", {"docker", "builder", "prune"}),
+            ("preview_argv", iter(("docker", "system", "df"))),
+            ("preview_argv", {"docker", "system", "df"}),
+        ):
+            values = {"argv": valid, "preview_argv": valid}
+            values[field] = invalid
+            with self.subTest(field=field, vector_type=type(invalid).__name__):
+                with self.assertRaises(TypeError):
+                    ToolAction("docker", "build-cache", **values)
+
+    def test_argument_elements_must_be_strings(self):
+        from mac_dev_clean.recommendation import ToolAction
+
+        valid = ("docker", "system", "df")
+        for field, invalid_element in (
+            ("argv", b"prune"),
+            ("argv", 7),
+            ("argv", ["prune"]),
+            ("preview_argv", b"df"),
+            ("preview_argv", 7),
+            ("preview_argv", ["df"]),
+        ):
+            values = {"argv": valid, "preview_argv": valid}
+            values[field] = ("docker", invalid_element)
+            with self.subTest(
+                field=field, element_type=type(invalid_element).__name__
+            ):
+                with self.assertRaises(TypeError):
+                    ToolAction("docker", "build-cache", **values)
+
+    def test_embedded_nul_argument_elements_are_rejected(self):
+        from mac_dev_clean.recommendation import ToolAction
+
+        valid = ("docker", "system", "df")
+        for field in ("argv", "preview_argv"):
+            values = {"argv": valid, "preview_argv": valid}
+            values[field] = ("docker", "bad\x00argument")
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    ToolAction("docker", "build-cache", **values)
+
     def test_empty_argv_is_rejected(self):
         from mac_dev_clean.recommendation import ToolAction
 
@@ -178,6 +283,17 @@ class ToolActionTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             ToolAction("docker", "build-cache", ("docker", "builder", "prune"), ())
+
+    def test_empty_executable_is_rejected_for_both_argument_vectors(self):
+        from mac_dev_clean.recommendation import ToolAction
+
+        valid = ("docker", "system", "df")
+        for field in ("argv", "preview_argv"):
+            values = {"argv": valid, "preview_argv": valid}
+            values[field] = ("", "system", "df")
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    ToolAction("docker", "build-cache", **values)
 
     def test_tool_recommendation_serializes_its_tool_action(self):
         payload = self.build_tool_recommendation().to_dict()

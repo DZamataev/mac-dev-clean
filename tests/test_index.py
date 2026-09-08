@@ -163,6 +163,68 @@ class ScanIndexTests(unittest.TestCase):
 
 
 class ToolRecommendationRoundTripTests(unittest.TestCase):
+    def load_tool_payload(self, mutate):
+        from mac_dev_clean.recommendation import ToolAction
+
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        index = open_index(Path(temp.name) / "index.sqlite3")
+        self.addCleanup(index.close)
+        generation = index.begin_generation(
+            VolumeIdentity(device=1, uuid="U"), event_id=1
+        )
+        item = Recommendation(
+            detector_id="docker-build-cache",
+            category="tool-managed",
+            label="Docker build cache",
+            path=Path("/Users/test/home"),
+            action=ActionKind.INVOKE_TOOL,
+            allocated_bytes=1,
+            reclaimable_bytes=1,
+            confidence=Confidence.EXACT,
+            restoration=RestorationCost.EXTERNAL_STATE,
+            selected_by_default=False,
+            evidence=(),
+            safety_root=Path("/Users/test/home"),
+            reason="",
+            generation=generation,
+            tool_action=ToolAction(
+                tool="docker",
+                resource="build-cache",
+                argv=("docker", "builder", "prune", "-f"),
+                preview_argv=("docker", "system", "df"),
+                reported="7.499GB",
+            ),
+        )
+        index.record_recommendation(item)
+        payload = item.to_dict()
+        mutate(payload)
+        index.execute_for_test(
+            "UPDATE recommendations SET payload = ? WHERE id = ? AND generation = ?",
+            (json.dumps(payload), item.id, generation),
+        )
+        index.complete_generation()
+        return index.load_recommendation(item.id)
+
+    def load_path_payload(self, mutate):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        index = open_index(Path(temp.name) / "index.sqlite3")
+        self.addCleanup(index.close)
+        generation = index.begin_generation(
+            VolumeIdentity(device=1, uuid="U"), event_id=1
+        )
+        item = build_recommendation(generation)
+        index.record_recommendation(item)
+        payload = item.to_dict()
+        mutate(payload)
+        index.execute_for_test(
+            "UPDATE recommendations SET payload = ? WHERE id = ? AND generation = ?",
+            (json.dumps(payload), item.id, generation),
+        )
+        index.complete_generation()
+        return index.load_recommendation(item.id)
+
     def test_a_tool_recommendation_survives_a_round_trip(self):
         from mac_dev_clean.recommendation import ToolAction
 
@@ -231,6 +293,53 @@ class ToolRecommendationRoundTripTests(unittest.TestCase):
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded.action, ActionKind.DELETE_TREE)
         self.assertIsNone(loaded.tool_action)
+
+    def test_path_recommendation_with_null_tool_action_decodes(self):
+        loaded = self.load_path_payload(
+            lambda payload: payload.__setitem__("tool_action", None)
+        )
+
+        self.assertIsNotNone(loaded)
+        self.assertIsNone(loaded.tool_action)
+
+    def test_falsey_malformed_tool_action_payloads_are_rejected(self):
+        for malformed, exception in (
+            ({}, KeyError),
+            ([], TypeError),
+            ("", TypeError),
+            (0, TypeError),
+            (False, TypeError),
+        ):
+            with self.subTest(payload=malformed):
+                with self.assertRaises(exception):
+                    self.load_path_payload(
+                        lambda payload, value=malformed: payload.__setitem__(
+                            "tool_action", value
+                        )
+                    )
+
+    def test_stored_whole_string_argv_is_rejected(self):
+        def replace_argv(payload):
+            payload["tool_action"]["argv"] = "docker builder prune -f"
+
+        with self.assertRaises(TypeError):
+            self.load_tool_payload(replace_argv)
+
+    def test_stored_whole_string_preview_argv_is_rejected(self):
+        def replace_preview_argv(payload):
+            payload["tool_action"]["preview_argv"] = "docker system df"
+
+        with self.assertRaises(TypeError):
+            self.load_tool_payload(replace_preview_argv)
+
+    def test_stored_tool_action_without_reported_uses_empty_string(self):
+        def remove_reported(payload):
+            del payload["tool_action"]["reported"]
+
+        loaded = self.load_tool_payload(remove_reported)
+
+        self.assertIsNotNone(loaded.tool_action)
+        self.assertEqual(loaded.tool_action.reported, "")
 
 
 if __name__ == "__main__":

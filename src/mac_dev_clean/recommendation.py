@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -65,16 +66,33 @@ class ToolAction:
     reported: str = ""
 
     def __post_init__(self) -> None:
-        if isinstance(self.argv, (str, bytes)):
+        for field in ("tool", "resource", "reported"):
+            if not isinstance(getattr(self, field), str):
+                raise TypeError("{} must be a string".format(field))
+        if not isinstance(self.argv, Sequence) or isinstance(self.argv, (str, bytes)):
             raise TypeError("argv must be a sequence of argument strings")
-        if isinstance(self.preview_argv, (str, bytes)):
+        if not isinstance(self.preview_argv, Sequence) or isinstance(
+            self.preview_argv, (str, bytes)
+        ):
             raise TypeError("preview_argv must be a sequence of argument strings")
         argv = tuple(self.argv)
         preview_argv = tuple(self.preview_argv)
+        if any(not isinstance(argument, str) for argument in argv):
+            raise TypeError("argv elements must be strings")
+        if any(not isinstance(argument, str) for argument in preview_argv):
+            raise TypeError("preview_argv elements must be strings")
+        if any("\x00" in argument for argument in argv):
+            raise ValueError("argv elements must not contain NUL")
+        if any("\x00" in argument for argument in preview_argv):
+            raise ValueError("preview_argv elements must not contain NUL")
         if not argv:
             raise ValueError("argv must not be empty")
         if not preview_argv:
             raise ValueError("preview_argv must not be empty")
+        if not argv[0]:
+            raise ValueError("argv executable must not be empty")
+        if not preview_argv[0]:
+            raise ValueError("preview_argv executable must not be empty")
         object.__setattr__(self, "argv", argv)
         object.__setattr__(self, "preview_argv", preview_argv)
 
@@ -120,8 +138,8 @@ class Recommendation:
     reason: str
     generation: int
     last_activity_at: Optional[datetime] = None
-    tool_action: Optional[ToolAction] = None
     warning: str = ""
+    tool_action: Optional[ToolAction] = None
 
     def __post_init__(self) -> None:
         if self.action is ActionKind.INVOKE_TOOL and self.tool_action is None:
