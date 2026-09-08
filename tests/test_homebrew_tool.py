@@ -46,6 +46,43 @@ class ParseBrewPreviewTests(unittest.TestCase):
 
         self.assertEqual(total, 799800000)
 
+    def test_rejects_a_malformed_decimal_in_the_summary(self):
+        total, _ = parse_brew_preview(
+            "==> This operation would free approximately 1.2.3MB of disk space.\n"
+        )
+
+        self.assertEqual(total, 0)
+
+    def test_rejects_trailing_junk_after_the_canonical_summary(self):
+        total, _ = parse_brew_preview(
+            "==> This operation would free approximately 12MB of disk space. junk\n"
+        )
+
+        self.assertEqual(total, 0)
+
+    def test_ignores_an_embedded_summary_like_fragment(self):
+        total, _ = parse_brew_preview(
+            "log: ==> This operation would free approximately 12MB of disk space.\n"
+        )
+
+        self.assertEqual(total, 0)
+
+    def test_rejects_a_malformed_summary_even_with_one_valid_summary(self):
+        total, _ = parse_brew_preview(
+            "==> This operation would free approximately 1.2.3MB of disk space.\n"
+            "==> This operation would free approximately 12MB of disk space.\n"
+        )
+
+        self.assertEqual(total, 0)
+
+    def test_rejects_multiple_canonical_summaries(self):
+        total, _ = parse_brew_preview(
+            "==> This operation would free approximately 12MB of disk space.\n"
+            "==> This operation would free approximately 34MB of disk space.\n"
+        )
+
+        self.assertEqual(total, 0)
+
     def test_counts_only_removal_lines(self):
         _, count = parse_brew_preview(
             "Would remove: /opt/homebrew/old-a (1 files, 1MB)\n"
@@ -100,18 +137,19 @@ class AnalyzeHomebrewTests(unittest.TestCase):
         self.assertEqual(items, [])
         self.assertIsNone(unavailable)
 
-    def test_removal_without_parseable_total_is_still_reported(self):
+    def test_removal_without_a_unique_positive_total_is_a_parse_error(self):
         items, unavailable = analyze_homebrew(
             runner_returning("Would remove: /opt/homebrew/old-a\n"),
             generation=1,
             home=HOME,
         )
 
-        self.assertIsNone(unavailable)
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].allocated_bytes, 0)
-        self.assertEqual(items[0].reclaimable_bytes, 0)
-        self.assertEqual(items[0].tool_action.reported, "1 items")
+        self.assertEqual(items, [])
+        self.assertEqual(
+            unavailable,
+            "brew reported 1 removal but no unique valid positive cleanup total",
+        )
+        self.assertLessEqual(len(unavailable), MAX_STDERR_CHARS)
 
     def test_recommendation_matches_the_homebrew_cleanup_contract(self):
         items, unavailable = analyze_homebrew(
