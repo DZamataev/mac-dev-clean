@@ -13,10 +13,18 @@ from ..recommendation import (
     RestorationCost,
     ToolAction,
 )
-from .runner import ToolRunner, ToolUnavailable
+from .runner import MAX_STDERR_CHARS, ToolRunner, ToolUnavailable
 from .sizes import parse_tool_size
 
 DOCKER_PREVIEW_ARGV = ("docker", "system", "df", "--format", "{{json .}}")
+_TRUNCATION_MARKER = "...[truncated]"
+
+
+def _bounded_reason(reason: str) -> str:
+    if len(reason) <= MAX_STDERR_CHARS:
+        return reason
+    retained = MAX_STDERR_CHARS - len(_TRUNCATION_MARKER)
+    return reason[:retained] + _TRUNCATION_MARKER
 
 
 @dataclass(frozen=True)
@@ -25,7 +33,9 @@ class _ResourceClass:
     resource: str
     label: str
     argv: Tuple[str, ...]
+    target: str
     note: str
+    confidence: Confidence
 
 
 #: `docker image prune -a` is deliberately absent. It removes every image not
@@ -37,30 +47,44 @@ _CLASSES = (
     _ResourceClass(
         docker_type="Build Cache",
         resource="build-cache",
-        label="Docker build cache",
+        label="Docker default-prune build cache",
         argv=("docker", "builder", "prune", "-f"),
-        note="Layer cache from previous builds. Docker rebuilds it on the next build.",
+        target="build cache eligible for Docker's default builder prune",
+        note=(
+            "Build cache eligible for Docker's default builder prune. Docker "
+            "rebuilds removed cache on the next build."
+        ),
+        confidence=Confidence.HEURISTIC,
     ),
     _ResourceClass(
         docker_type="Images",
         resource="images",
         label="Docker dangling images",
         argv=("docker", "image", "prune", "-f"),
-        note="Untagged images. Tagged images and images in use are not touched.",
+        target="dangling images",
+        note="Dangling images. Tagged images and images in use are not touched.",
+        confidence=Confidence.HEURISTIC,
     ),
     _ResourceClass(
         docker_type="Containers",
         resource="containers",
         label="Docker stopped containers",
         argv=("docker", "container", "prune", "-f"),
+        target="stopped containers",
         note="Stopped containers. Running containers are not touched.",
+        confidence=Confidence.EXACT,
     ),
     _ResourceClass(
         docker_type="Local Volumes",
         resource="volumes",
-        label="Docker unused volumes",
+        label="Docker unused anonymous volumes",
         argv=("docker", "volume", "prune", "-f"),
-        note="Volumes no container references. Volume data cannot be recovered.",
+        target="unused anonymous volumes",
+        note=(
+            "Unused anonymous volumes with no container references. Volume data "
+            "cannot be recovered."
+        ),
+        confidence=Confidence.HEURISTIC,
     ),
 )
 
@@ -81,11 +105,12 @@ def analyze_docker(
     try:
         result = runner(DOCKER_PREVIEW_ARGV)
     except ToolUnavailable as exc:
-        return [], exc.reason
+        return [], _bounded_reason(exc.reason)
 
     if not result.ok:
         detail = result.stderr.strip() or result.stdout.strip()
-        return [], detail or "docker exited with {}".format(result.exit_code)
+        reason = detail or "docker exited with {}".format(result.exit_code)
+        return [], _bounded_reason(reason)
 
     items: List[Recommendation] = []
     seen_resources = set()
@@ -99,7 +124,10 @@ def analyze_docker(
         if not isinstance(payload, dict):
             continue
 
-        spec = _CLASSES_BY_TYPE.get(str(payload.get("Type", "")))
+        docker_type = payload.get("Type")
+        if not isinstance(docker_type, str):
+            continue
+        spec = _CLASSES_BY_TYPE.get(docker_type)
         if spec is None:
             continue
         if spec.resource in seen_resources:
@@ -107,14 +135,33 @@ def analyze_docker(
             continue
         seen_resources.add(spec.resource)
 
-        reported = str(payload.get("Reclaimable", ""))
+        reported = payload.get("Reclaimable")
+        total = payload.get("Size")
+        if not isinstance(reported, str) or not isinstance(total, str):
+            continue
         reclaimable = parse_tool_size(reported)
-        if reclaimable <= 0:
+        allocated = parse_tool_size(total)
+        if reclaimable <= 0 or allocated <= 0:
             continue
 
-        total = str(payload.get("Size", ""))
+        if spec.confidence is Confidence.EXACT:
+            report_detail = "docker reports {} reclaimable".format(reported)
+            warning = (
+                "Docker reports this figure. Freed space may not appear on the "
+                "volume until Docker compacts its disk image."
+            )
+        else:
+            report_detail = (
+                "docker reports {} reclaimable class-wide; this is an upper bound "
+                "for {}"
+            ).format(reported, spec.target)
+            warning = (
+                "Docker's class-wide figure is an upper bound for {}; actual "
+                "reclaimed space may be lower. Freed space may not "
+                "appear on the volume until Docker compacts its disk image."
+            ).format(spec.target)
         evidence = (
-            Evidence("tool-report", "docker reports {} reclaimable".format(reported)),
+            Evidence("tool-report", report_detail),
             Evidence("tool-total", "docker reports {} in total".format(total)),
             Evidence("preview-command", " ".join(DOCKER_PREVIEW_ARGV)),
         )
@@ -126,16 +173,16 @@ def analyze_docker(
                 label=spec.label,
                 path=home,
                 action=ActionKind.INVOKE_TOOL,
-                allocated_bytes=parse_tool_size(total),
+                allocated_bytes=allocated,
                 reclaimable_bytes=reclaimable,
-                confidence=Confidence.EXACT,
+                confidence=spec.confidence,
                 restoration=RestorationCost.EXTERNAL_STATE,
                 selected_by_default=False,
                 evidence=evidence,
                 safety_root=home,
                 reason=spec.note,
                 generation=generation,
-                warning="Docker reports this figure. Freed space may not appear on the volume until Docker compacts its disk image.",
+                warning=warning,
                 tool_action=ToolAction(
                     tool="docker",
                     resource=spec.resource,

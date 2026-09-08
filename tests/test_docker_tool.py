@@ -3,9 +3,13 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from mac_dev_clean.recommendation import ActionKind
+from mac_dev_clean.recommendation import (
+    ActionKind,
+    Confidence,
+    RestorationCost,
+)
 from mac_dev_clean.tools.docker import DOCKER_PREVIEW_ARGV, analyze_docker
-from mac_dev_clean.tools.runner import ToolResult, ToolUnavailable
+from mac_dev_clean.tools.runner import MAX_STDERR_CHARS, ToolResult, ToolUnavailable
 
 HOME = Path("/Users/test/home")
 
@@ -18,6 +22,13 @@ REAL_OUTPUT = (
     '"TotalCount":"6","Type":"Local Volumes"}\n'
     '{"Active":"0","Reclaimable":"7.499GB","Size":"18.92GB",'
     '"TotalCount":"144","Type":"Build Cache"}\n'
+)
+
+ALL_CLASSES_OUTPUT = (
+    '{"Reclaimable":"4GB","Size":"5GB","Type":"Build Cache"}\n'
+    '{"Reclaimable":"3GB (60%)","Size":"6GB","Type":"Images"}\n'
+    '{"Reclaimable":"2GB","Size":"7GB","Type":"Containers"}\n'
+    '{"Reclaimable":"1GB (25%)","Size":"8GB","Type":"Local Volumes"}\n'
 )
 
 
@@ -38,6 +49,120 @@ def runner_raising(reason: str = "not installed"):
 
 
 class DockerInventoryTests(unittest.TestCase):
+    def test_all_classes_have_safe_actions_and_accurate_estimate_metadata(self):
+        items, unavailable = analyze_docker(
+            runner_returning(ALL_CLASSES_OUTPUT), generation=9, home=HOME
+        )
+
+        self.assertIsNone(unavailable)
+        expected = {
+            "build-cache": {
+                "detector_id": "docker-build-cache",
+                "id": "a5cc7a314bac4a78",
+                "label": "Docker default-prune build cache",
+                "argv": ("docker", "builder", "prune", "-f"),
+                "allocated": 5000000000,
+                "reclaimable": 4000000000,
+                "confidence": Confidence.HEURISTIC,
+                "reported": "4GB",
+                "target": "default builder prune",
+                "report_evidence": (
+                    "docker reports 4GB reclaimable class-wide; this is an upper "
+                    "bound for build cache eligible for Docker's default builder "
+                    "prune"
+                ),
+                "total_evidence": "docker reports 5GB in total",
+            },
+            "images": {
+                "detector_id": "docker-images",
+                "id": "0d518fe91dd3f7b4",
+                "label": "Docker dangling images",
+                "argv": ("docker", "image", "prune", "-f"),
+                "allocated": 6000000000,
+                "reclaimable": 3000000000,
+                "confidence": Confidence.HEURISTIC,
+                "reported": "3GB (60%)",
+                "target": "dangling images",
+                "report_evidence": (
+                    "docker reports 3GB (60%) reclaimable class-wide; this is an "
+                    "upper bound for dangling images"
+                ),
+                "total_evidence": "docker reports 6GB in total",
+            },
+            "containers": {
+                "detector_id": "docker-containers",
+                "id": "3fe4686bf493d2a3",
+                "label": "Docker stopped containers",
+                "argv": ("docker", "container", "prune", "-f"),
+                "allocated": 7000000000,
+                "reclaimable": 2000000000,
+                "confidence": Confidence.EXACT,
+                "reported": "2GB",
+                "target": "stopped containers",
+                "report_evidence": "docker reports 2GB reclaimable",
+                "total_evidence": "docker reports 7GB in total",
+            },
+            "volumes": {
+                "detector_id": "docker-volumes",
+                "id": "11c986542fd47298",
+                "label": "Docker unused anonymous volumes",
+                "argv": ("docker", "volume", "prune", "-f"),
+                "allocated": 8000000000,
+                "reclaimable": 1000000000,
+                "confidence": Confidence.HEURISTIC,
+                "reported": "1GB (25%)",
+                "target": "unused anonymous volumes",
+                "report_evidence": (
+                    "docker reports 1GB (25%) reclaimable class-wide; this is an "
+                    "upper bound for unused anonymous volumes"
+                ),
+                "total_evidence": "docker reports 8GB in total",
+            },
+        }
+
+        self.assertEqual(len(items), 4)
+        self.assertEqual(len({item.id for item in items}), 4)
+        for item in items:
+            resource = item.tool_action.resource
+            want = expected[resource]
+            self.assertEqual(item.detector_id, want["detector_id"])
+            self.assertEqual(item.id, want["id"])
+            self.assertEqual(item.label, want["label"])
+            self.assertEqual(item.tool_action.argv, want["argv"])
+            self.assertEqual(item.allocated_bytes, want["allocated"])
+            self.assertEqual(item.reclaimable_bytes, want["reclaimable"])
+            self.assertIs(item.confidence, want["confidence"])
+            self.assertIs(item.action, ActionKind.INVOKE_TOOL)
+            self.assertIs(item.restoration, RestorationCost.EXTERNAL_STATE)
+            self.assertFalse(item.selected_by_default)
+            self.assertEqual(item.generation, 9)
+            self.assertEqual(item.path, HOME)
+            self.assertEqual(item.safety_root, HOME)
+            self.assertEqual(item.tool_action.tool, "docker")
+            self.assertEqual(item.tool_action.reported, want["reported"])
+            self.assertEqual(item.tool_action.preview_argv, DOCKER_PREVIEW_ARGV)
+            self.assertNotIn("-a", item.tool_action.argv)
+            self.assertNotIn("--all", item.tool_action.argv)
+            self.assertIn(want["target"], item.reason.lower())
+
+            evidence = {entry.code: entry.detail for entry in item.evidence}
+            self.assertEqual(
+                evidence["preview-command"],
+                "docker system df --format {{json .}}",
+            )
+            self.assertEqual(evidence["tool-report"], want["report_evidence"])
+            self.assertEqual(evidence["tool-total"], want["total_evidence"])
+            if resource == "containers":
+                self.assertNotIn("upper bound", item.warning.lower())
+            else:
+                self.assertIn("class-wide", evidence["tool-report"].lower())
+                self.assertIn("upper bound", evidence["tool-report"].lower())
+                self.assertIn(want["target"], item.warning.lower())
+                self.assertIn("upper bound", item.warning.lower())
+                self.assertIn(
+                    "actual reclaimed space may be lower", item.warning.lower()
+                )
+
     def test_produces_one_recommendation_per_reclaimable_class(self):
         items, unavailable = analyze_docker(
             runner_returning(REAL_OUTPUT), generation=1, home=HOME
@@ -140,6 +265,73 @@ class DockerInventoryTests(unittest.TestCase):
             [item.tool_action.resource for item in items], ["build-cache"]
         )
 
+    def test_duplicate_variants_omit_the_ambiguous_class_only(self):
+        independent = '{"Reclaimable":"2GB","Size":"3GB","Type":"Containers"}\n'
+        cases = {
+            "valid then zero": (
+                '{"Reclaimable":"1GB","Size":"2GB","Type":"Images"}\n'
+                '{"Reclaimable":"0B","Size":"2GB","Type":"Images"}\n'
+            ),
+            "valid then malformed": (
+                '{"Reclaimable":"1GB","Size":"2GB","Type":"Images"}\n'
+                '{"Reclaimable":1,"Size":"2GB","Type":"Images"}\n'
+            ),
+            "malformed then valid": (
+                '{"Reclaimable":1,"Size":"2GB","Type":"Images"}\n'
+                '{"Reclaimable":"1GB","Size":"2GB","Type":"Images"}\n'
+            ),
+        }
+
+        for name, duplicate_rows in cases.items():
+            with self.subTest(name=name):
+                items, unavailable = analyze_docker(
+                    runner_returning(duplicate_rows + independent),
+                    generation=1,
+                    home=HOME,
+                )
+
+                self.assertIsNone(unavailable)
+                self.assertEqual(
+                    [item.tool_action.resource for item in items], ["containers"]
+                )
+
+    def test_malformed_non_object_and_unknown_rows_do_not_hide_valid_classes(self):
+        cases = {
+            "invalid json": "not json",
+            "array": "[]",
+            "scalar": '"Images"',
+            "null": "null",
+            "missing type": '{"Reclaimable":"1GB","Size":"2GB"}',
+            "unknown type": '{"Reclaimable":"1GB","Size":"2GB","Type":"Networks"}',
+            "non-string type": '{"Reclaimable":"1GB","Size":"2GB","Type":7}',
+            "missing reclaimable": '{"Size":"2GB","Type":"Images"}',
+            "non-string reclaimable": (
+                '{"Reclaimable":1,"Size":"2GB","Type":"Images"}'
+            ),
+            "unparseable reclaimable": (
+                '{"Reclaimable":"many","Size":"2GB","Type":"Images"}'
+            ),
+            "missing size": '{"Reclaimable":"1GB","Type":"Images"}',
+            "non-string size": '{"Reclaimable":"1GB","Size":2,"Type":"Images"}',
+            "unparseable size": (
+                '{"Reclaimable":"1GB","Size":"many","Type":"Images"}'
+            ),
+        }
+        valid = '{"Reclaimable":"2GB","Size":"3GB","Type":"Containers"}'
+
+        for name, malformed in cases.items():
+            with self.subTest(name=name):
+                items, unavailable = analyze_docker(
+                    runner_returning(malformed + "\n" + valid + "\n"),
+                    generation=1,
+                    home=HOME,
+                )
+
+                self.assertIsNone(unavailable)
+                self.assertEqual(
+                    [item.tool_action.resource for item in items], ["containers"]
+                )
+
     def test_recommendations_follow_declared_class_order_not_docker_row_order(self):
         scrambled = (
             '{"Reclaimable":"1GB","Size":"2GB","Type":"Containers"}\n'
@@ -160,6 +352,48 @@ class DockerInventoryTests(unittest.TestCase):
 
 
 class DockerUnavailableTests(unittest.TestCase):
+    def assert_reason_is_bounded(self, reason):
+        self.assertEqual(len(reason), MAX_STDERR_CHARS)
+        self.assertTrue(reason.endswith("...[truncated]"))
+
+    def test_exception_reason_is_bounded_with_marker(self):
+        boundary = "e" * MAX_STDERR_CHARS
+        _, exact = analyze_docker(runner_raising(boundary), generation=1, home=HOME)
+        _, truncated = analyze_docker(
+            runner_raising(boundary + "x"), generation=1, home=HOME
+        )
+
+        self.assertEqual(exact, boundary)
+        self.assert_reason_is_bounded(truncated)
+
+    def test_stderr_reason_is_bounded_with_marker(self):
+        boundary = "e" * MAX_STDERR_CHARS
+        _, exact = analyze_docker(
+            runner_returning("", exit_code=1, stderr=boundary),
+            generation=1,
+            home=HOME,
+        )
+        _, truncated = analyze_docker(
+            runner_returning("", exit_code=1, stderr=boundary + "x"),
+            generation=1,
+            home=HOME,
+        )
+
+        self.assertEqual(exact, boundary)
+        self.assert_reason_is_bounded(truncated)
+
+    def test_stdout_fallback_reason_is_bounded_with_marker(self):
+        boundary = "o" * MAX_STDERR_CHARS
+        _, exact = analyze_docker(
+            runner_returning(boundary, exit_code=1), generation=1, home=HOME
+        )
+        _, truncated = analyze_docker(
+            runner_returning(boundary + "x", exit_code=1), generation=1, home=HOME
+        )
+
+        self.assertEqual(exact, boundary)
+        self.assert_reason_is_bounded(truncated)
+
     def test_missing_binary_yields_a_reason_and_no_items(self):
         items, unavailable = analyze_docker(
             runner_raising("not installed"), generation=1, home=HOME
