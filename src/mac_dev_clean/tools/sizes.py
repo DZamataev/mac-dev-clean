@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 
 #: Docker and Homebrew report SI units, not binary ones: `15.03GB` means
@@ -33,7 +34,7 @@ def parse_tool_size(text: str) -> int:
         value = float(match.group(1))
     except ValueError:
         return 0
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         return 0
 
     unit = match.group(2).upper()
@@ -41,5 +42,8 @@ def parse_tool_size(text: str) -> int:
         return int(value)
     for suffix, multiplier in _MULTIPLIERS:
         if unit == suffix:
-            return int(value * multiplier)
+            result = value * multiplier
+            if not math.isfinite(result):
+                return 0
+            return int(result)
     return 0

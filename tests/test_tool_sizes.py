@@ -45,6 +45,12 @@ class ParseToolSizeTests(unittest.TestCase):
     def test_negative_values_are_clamped_to_zero(self):
         self.assertEqual(parse_tool_size("-5GB"), 0)
 
+    def test_overflowing_numeric_string_degrades_to_zero(self):
+        self.assertEqual(parse_tool_size("9" * 400), 0)
+
+    def test_overflowing_value_with_unit_degrades_to_zero(self):
+        self.assertEqual(parse_tool_size(("9" * 400) + "GB"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
