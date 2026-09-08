@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from mac_dev_clean.journal import (
     ActionJournal,
@@ -144,6 +145,23 @@ class JournalFailureTests(unittest.TestCase):
         # Non-sensitive: must not leak the full absolute path.
         self.assertNotIn(str(blocked), journal.last_warning)
 
+    def test_non_serializable_field_returns_false_without_raising(self):
+        class Unserializable:
+            pass
+
+        journal = ActionJournal(self.tmp_journal_path())
+        record = build_record(detail=Unserializable())
+
+        self.assertFalse(journal.append(record))
+
+        self.assertIsNotNone(journal.last_warning)
+        self.assertIsInstance(journal.last_warning, str)
+        self.assertLessEqual(len(journal.last_warning), 200)
+        self.assertNotIn(self.tmp.name, journal.last_warning)
+
+    def tmp_journal_path(self):
+        return Path(self.tmp.name) / "actions.jsonl"
+
     def test_last_warning_clears_after_a_later_successful_append(self):
         blocked = Path(self.tmp.name) / "blocked3"
         blocked.mkdir()
@@ -194,6 +212,22 @@ class JournalRotationTests(unittest.TestCase):
         journal.append(build_record())
 
         self.assertFalse(self.path.with_suffix(".jsonl.1").exists())
+
+    def test_append_succeeds_but_retains_warning_when_rotation_fails(self):
+        self.path.write_text("x" * (MAX_JOURNAL_BYTES + 1), encoding="utf-8")
+        journal = ActionJournal(self.path)
+
+        with mock.patch(
+            "mac_dev_clean.journal.os.replace",
+            side_effect=OSError(13, "Permission denied"),
+        ):
+            self.assertTrue(journal.append(build_record()))
+
+        self.assertIsNotNone(journal.last_warning)
+        self.assertIsInstance(journal.last_warning, str)
+        self.assertLessEqual(len(journal.last_warning), 200)
+        # Non-sensitive: must not leak the full absolute path.
+        self.assertNotIn(str(self.path), journal.last_warning)
 
 
 class OpenJournalTests(unittest.TestCase):
