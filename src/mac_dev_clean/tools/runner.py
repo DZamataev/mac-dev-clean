@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, TextIO, Tuple
@@ -51,6 +52,40 @@ class ToolResult:
 #: Every analyzer takes one of these so tests can substitute a fake without
 #: any monkeypatching of subprocess.
 ToolRunner = Callable[[Sequence[str]], ToolResult]
+
+
+def inventory_argv_matches(actual: object, requested: Sequence[str]) -> bool:
+    """Return whether inventory provenance semantically matches its request."""
+    if isinstance(actual, (str, bytes)) or not isinstance(actual, SequenceABC):
+        return False
+    if isinstance(requested, (str, bytes)) or not isinstance(requested, SequenceABC):
+        return False
+    if not actual or not requested:
+        return False
+    if any(not isinstance(item, str) or "\x00" in item for item in actual):
+        return False
+    if any(not isinstance(item, str) or "\x00" in item for item in requested):
+        return False
+    if tuple(actual[1:]) != tuple(requested[1:]):
+        return False
+
+    actual_executable = actual[0]
+    requested_executable = requested[0]
+    separators = [os.sep]
+    if os.altsep is not None:
+        separators.append(os.altsep)
+    requested_is_explicit = any(
+        separator in requested_executable for separator in separators
+    )
+    if requested_is_explicit:
+        return os.path.normpath(actual_executable) == os.path.normpath(
+            requested_executable
+        )
+    return actual_executable == requested_executable or (
+        os.path.isabs(actual_executable)
+        and os.path.basename(os.path.normpath(actual_executable))
+        == requested_executable
+    )
 
 
 def _drain_text(

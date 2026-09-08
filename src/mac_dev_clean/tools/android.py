@@ -11,6 +11,7 @@ from ..recommendation import (
     Recommendation,
     RestorationCost,
     ToolAction,
+    normalized_path,
 )
 from ..scanner import path_size
 from .runner import (
@@ -18,7 +19,7 @@ from .runner import (
     ToolResult,
     ToolRunner,
     ToolUnavailable,
-    find_binary,
+    inventory_argv_matches,
 )
 
 SDK_LIST_ARGV = ("sdkmanager", "--list_installed")
@@ -79,7 +80,9 @@ def find_sdk_root(env: Dict[str, str], home: Path) -> Optional[Path]:
         raw = env.get(key)
         if raw:
             try:
-                candidates.append(Path(raw).expanduser())
+                candidate = Path(raw).expanduser()
+                if candidate.is_absolute():
+                    candidates.append(candidate)
             except (OSError, RuntimeError, ValueError):
                 pass
     try:
@@ -100,15 +103,26 @@ def cmdline_tool_dirs(sdk_root: Path) -> Tuple[Path, ...]:
     base = Path(sdk_root) / "cmdline-tools"
     directories = [base / "latest" / "bin"]  # type: List[Path]
     try:
-        entries = sorted(base.iterdir(), key=lambda entry: entry.name, reverse=True)
+        entries = list(base.iterdir())
     except (OSError, RuntimeError, ValueError):
         entries = []
+    numeric = []  # type: List[Tuple[Tuple[int, ...], Path]]
+    fallback = []  # type: List[Path]
     for entry in entries:
         try:
-            if entry.name != "latest" and entry.is_dir():
-                directories.append(entry / "bin")
+            if entry.name == "latest" or not entry.is_dir():
+                continue
         except (OSError, RuntimeError, ValueError):
             continue
+        segments = entry.name.split(".")
+        if segments and all(segment.isdigit() for segment in segments):
+            numeric.append((tuple(int(segment) for segment in segments), entry))
+        else:
+            fallback.append(entry)
+    numeric.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+    fallback.sort(key=lambda entry: entry.name)
+    directories.extend(entry / "bin" for _, entry in numeric)
+    directories.extend(entry / "bin" for entry in fallback)
     directories.append(Path(sdk_root) / "tools" / "bin")
     return tuple(directories)
 
@@ -142,10 +156,12 @@ def parse_avds(stdout: str) -> Tuple[List[Avd], List[Avd]]:
     unloadable = []  # type: List[Avd]
     section = None  # type: Optional[str]
     current = {}  # type: Dict[str, str]
+    invalid_record = False
 
     def flush() -> None:
+        nonlocal invalid_record
         name = current.get("Name", "")
-        if name:
+        if name and not invalid_record:
             avd = Avd(
                 name=name,
                 path=current.get("Path", ""),
@@ -157,6 +173,7 @@ def parse_avds(stdout: str) -> Tuple[List[Avd], List[Avd]]:
             elif section == "unloadable":
                 unloadable.append(avd)
         current.clear()
+        invalid_record = False
 
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
@@ -175,10 +192,30 @@ def parse_avds(stdout: str) -> Tuple[List[Avd], List[Avd]]:
         for key in ("Name", "Path", "Target", "Error"):
             prefix = key + ":"
             if line.startswith(prefix):
-                current[key] = line[len(prefix) :].strip()
+                if key != "Name" and key in current:
+                    invalid_record = True
+                else:
+                    current[key] = line[len(prefix) :].strip()
                 break
     flush()
     return loadable, unloadable
+
+
+def _group_for_package(package_path: str) -> Optional[Tuple[str, str]]:
+    if package_path == "emulator":
+        return "android-emulator", "Android emulator"
+    segments = package_path.split(";")
+    if not segments or any(not segment for segment in segments):
+        return None
+    required_segments = 3 if segments[0] == "system-images" else 2
+    if len(segments) < required_segments:
+        return None
+    if segments[0] != "system-images" and len(segments) != required_segments:
+        return None
+    for prefix, detector_id, label in _GROUPS:
+        if prefix == segments[0] + ";":
+            return detector_id, label
+    return None
 
 
 def analyze_android(
@@ -202,6 +239,17 @@ def analyze_android(
     except ToolUnavailable as exc:
         sdk_result = None
         problems.append(_bounded_reason(exc.reason))
+    if (
+        sdk_result is not None
+        and sdk_result.ok
+        and not inventory_argv_matches(sdk_result.argv, SDK_LIST_ARGV)
+    ):
+        problems.append(
+            _bounded_reason(
+                "sdkmanager inventory provenance did not match requested command"
+            )
+        )
+        sdk_result = None
     if sdk_result is not None and sdk_result.ok:
         packages = parse_sdk_packages(sdk_result.stdout)
         identity_counts = {}  # type: Dict[str, int]
@@ -212,13 +260,7 @@ def analyze_android(
                 continue
             if not package.path or "\x00" in package.path:
                 continue
-            group = None
-            for prefix, detector_id, label in _GROUPS:
-                if package.path == prefix or (
-                    prefix.endswith(";") and package.path.startswith(prefix)
-                ):
-                    group = (detector_id, label)
-                    break
+            group = _group_for_package(package.path)
             if group is None:
                 continue
             if not package.location or "\x00" in package.location:
@@ -284,6 +326,17 @@ def analyze_android(
     except ToolUnavailable as exc:
         avd_result = None
         problems.append(_bounded_reason(exc.reason))
+    if (
+        avd_result is not None
+        and avd_result.ok
+        and not inventory_argv_matches(avd_result.argv, AVD_LIST_ARGV)
+    ):
+        problems.append(
+            _bounded_reason(
+                "avdmanager inventory provenance did not match requested command"
+            )
+        )
+        avd_result = None
     if avd_result is not None and avd_result.ok:
         loadable, unloadable = parse_avds(avd_result.stdout)
         avd_counts = {}  # type: Dict[str, int]
@@ -349,5 +402,14 @@ def analyze_android(
             )
     elif avd_result is not None:
         problems.append(_result_failure(avd_result, "avdmanager"))
+    location_counts = {}  # type: Dict[Tuple[str, str], int]
+    for item in items:
+        key = (item.detector_id, normalized_path(item.path))
+        location_counts[key] = location_counts.get(key, 0) + 1
+    items = [
+        item
+        for item in items
+        if location_counts[(item.detector_id, normalized_path(item.path))] == 1
+    ]
     combined = _bounded_reason("; ".join(problems)) if problems else None
     return items, combined

@@ -13,7 +13,12 @@ from ..recommendation import (
     RestorationCost,
     ToolAction,
 )
-from .runner import MAX_STDERR_CHARS, ToolRunner, ToolUnavailable
+from .runner import (
+    MAX_STDERR_CHARS,
+    ToolRunner,
+    ToolUnavailable,
+    inventory_argv_matches,
+)
 from .sizes import parse_tool_size
 
 DOCKER_PREVIEW_ARGV = ("docker", "system", "df", "--format", "{{json .}}")
@@ -111,6 +116,10 @@ def analyze_docker(
         detail = result.stderr.strip() or result.stdout.strip()
         reason = detail or "docker exited with {}".format(result.exit_code)
         return [], _bounded_reason(reason)
+    if not inventory_argv_matches(result.argv, DOCKER_PREVIEW_ARGV):
+        return [], _bounded_reason(
+            "docker inventory provenance did not match requested command"
+        )
 
     items: List[Recommendation] = []
     seen_resources = set()

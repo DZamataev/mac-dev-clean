@@ -6,6 +6,7 @@ from .runner import (
     ToolRunner,
     ToolUnavailable,
     find_binary,
+    inventory_argv_matches,
     run_tool,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "ToolRunner",
     "ToolUnavailable",
     "find_binary",
+    "inventory_argv_matches",
     "run_tool",
 ]

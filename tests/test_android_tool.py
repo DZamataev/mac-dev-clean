@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,6 +139,37 @@ Path: /tmp/BrokenNoError.avd
     def test_empty_output_yields_two_empty_lists(self):
         self.assertEqual(parse_avds(""), ([], []))
 
+    def test_duplicate_fields_invalidate_only_their_record_and_name_starts_new(self):
+        output = """Available Android Virtual Devices:
+Path: /tmp/before-name.avd
+Name: DuplicatePath
+Path: /tmp/first.avd
+Path: /tmp/second.avd
+Name: KeepLoadable
+Target: Android 35
+Path: /tmp/keep.avd
+Name: DuplicateTarget
+Path: /tmp/target.avd
+Target: one
+Target: two
+The following Android Virtual Devices could not be loaded:
+Name: DuplicateError
+Path: /tmp/error.avd
+Error: one
+Error: two
+Name: KeepBroken
+Error: missing image
+Path: /tmp/keep-broken.avd
+"""
+
+        self.assertEqual(
+            parse_avds(output),
+            (
+                [Avd("KeepLoadable", "/tmp/keep.avd", "Android 35", "")],
+                [Avd("KeepBroken", "/tmp/keep-broken.avd", "", "missing image")],
+            ),
+        )
+
 
 class FindSdkRootTests(unittest.TestCase):
     def test_uses_first_existing_candidate_in_declared_precedence(self):
@@ -191,6 +223,41 @@ class FindSdkRootTests(unittest.TestCase):
             default.rmdir()
             self.assertIsNone(find_sdk_root(env, home))
 
+    def test_relative_environment_roots_are_ignored(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            relative = root / "relative-sdk"
+            relative.mkdir()
+            absolute = root / "absolute-sdk"
+            absolute.mkdir()
+            default = root / "home" / "Library" / "Android" / "sdk"
+            default.mkdir(parents=True)
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                self.assertEqual(
+                    find_sdk_root(
+                        {
+                            "ANDROID_HOME": "relative-sdk",
+                            "ANDROID_SDK_ROOT": str(absolute),
+                        },
+                        root / "home",
+                    ),
+                    absolute,
+                )
+                self.assertEqual(
+                    find_sdk_root(
+                        {
+                            "ANDROID_HOME": "relative-sdk",
+                            "ANDROID_SDK_ROOT": "relative-sdk",
+                        },
+                        root / "home",
+                    ),
+                    default,
+                )
+            finally:
+                os.chdir(previous_cwd)
+
 
 class AnalyzeAndroidTests(unittest.TestCase):
     def test_missing_sdk_root_returns_unavailable_without_inventory_calls(self):
@@ -220,6 +287,61 @@ class AnalyzeAndroidTests(unittest.TestCase):
         )
         self.assertEqual(items, [])
         self.assertIsNone(unavailable)
+
+    def test_bad_inventory_provenance_does_not_suppress_the_sibling_analyzer(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            sdk = root / "sdk"
+            package = sdk / "cmake" / "1"
+            package.mkdir(parents=True)
+            (package / "blob").write_bytes(b"x")
+            avd = root / "Keep.avd"
+            avd.mkdir()
+            sdk_output = """Installed packages:
+Path | Version | Description | Location
+cmake;1 | 1 | cmake | cmake/1
+"""
+            avd_output = """Available Android Virtual Devices:
+Name: Keep
+Path: {path}
+""".format(path=avd)
+
+            def bad_sdk_runner(argv):
+                return ToolResult(
+                    ("wrong-sdkmanager", "--list_installed"), sdk_output, "", 0
+                )
+
+            def good_avd_runner(argv):
+                return ToolResult(
+                    ("/opt/android/bin/avdmanager",) + tuple(argv[1:]),
+                    avd_output,
+                    "",
+                    0,
+                )
+
+            items, unavailable = analyze_android(
+                bad_sdk_runner, good_avd_runner, 1, sdk
+            )
+            self.assertEqual([item.tool_action.resource for item in items], ["Keep"])
+            self.assertIn("sdkmanager inventory provenance", unavailable)
+
+            def good_sdk_runner(argv):
+                return ToolResult(
+                    ("/opt/android/bin/sdkmanager",) + tuple(argv[1:]),
+                    sdk_output,
+                    "",
+                    0,
+                )
+
+            def bad_avd_runner(argv):
+                return ToolResult("avdmanager list avd", avd_output, "", 0)
+
+            items, unavailable = analyze_android(
+                good_sdk_runner, bad_avd_runner, 1, sdk
+            )
+            self.assertEqual([item.tool_action.resource for item in items], ["cmake;1"])
+            self.assertIn("avdmanager inventory provenance", unavailable)
+            self.assertLessEqual(len(unavailable), MAX_STDERR_CHARS)
 
     def test_sdk_recommendation_has_exact_metadata_and_action_identity(self):
         sdk_output = """Installed packages:
@@ -454,6 +576,40 @@ emulator-extra | 1 | misleading emulator prefix | emulator-extra
             ],
         )
 
+    def test_rejects_incomplete_or_malformed_supported_package_identities(self):
+        identities = (
+            "ndk;",
+            "ndk;1;extra",
+            "cmake;",
+            "system-images;android-35",
+            "system-images;;x",
+            "system-images;android-35;",
+            "build-tools;",
+            "platforms;",
+            "cmdline-tools;",
+            "emulator;36",
+        )
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            sdk = Path(raw_tmp)
+            for index in range(len(identities)):
+                directory = sdk / "invalid" / str(index)
+                directory.mkdir(parents=True)
+                (directory / "blob").write_bytes(b"x")
+            output = "Installed packages:\nPath | Version | Description | Location\n"
+            output += "\n".join(
+                "{} | 1 | invalid | invalid/{}".format(identity, index)
+                for index, identity in enumerate(reversed(identities))
+            )
+
+            def runner(argv):
+                stdout = output if argv[0] == "sdkmanager" else ""
+                return ToolResult(tuple(argv), stdout, "", 0)
+
+            items, unavailable = analyze_android(runner, runner, 1, sdk)
+
+        self.assertIsNone(unavailable)
+        self.assertEqual(items, [])
+
     def test_duplicate_sdk_identities_are_omitted_in_both_row_orders(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             sdk = Path(raw_tmp)
@@ -465,6 +621,33 @@ emulator-extra | 1 | misleading emulator prefix | emulator-extra
                 "ndk;same | 1 | first | ndk/duplicate-a",
                 "cmake;keep | 2 | keep | cmake/independent",
                 "ndk;same | 1 | second | ndk/duplicate-b",
+            ]
+
+            for ordered_rows in (rows, list(reversed(rows))):
+                output = "Installed packages:\nPath | Version | Description | Location\n"
+                output += "\n".join(ordered_rows)
+
+                def runner(argv):
+                    stdout = output if argv[0] == "sdkmanager" else ""
+                    return ToolResult(tuple(argv), stdout, "", 0)
+
+                items, _ = analyze_android(runner, runner, 1, sdk)
+
+                self.assertEqual(
+                    [item.tool_action.resource for item in items], ["cmake;keep"]
+                )
+
+    def test_same_detector_sdk_location_collisions_are_omitted_in_both_orders(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            sdk = Path(raw_tmp)
+            for location in ("ndk/shared", "cmake/independent"):
+                directory = sdk / location
+                directory.mkdir(parents=True)
+                (directory / "blob").write_bytes(b"x")
+            rows = [
+                "ndk;one | 1 | first | ndk/shared",
+                "cmake;keep | 2 | keep | cmake/independent",
+                "ndk;two | 1 | second | ndk/shared",
             ]
 
             for ordered_rows in (rows, list(reversed(rows))):
@@ -493,6 +676,36 @@ emulator-extra | 1 | misleading emulator prefix | emulator-extra
                 "Name: Same\nPath: {}\nTarget: one".format(paths[0]),
                 "Name: Keep\nPath: {}\nTarget: keep".format(paths[2]),
                 "Name: Same\nPath: {}\nTarget: two".format(paths[1]),
+            ]
+
+            for ordered_records in (records, list(reversed(records))):
+                output = "Available Android Virtual Devices:\n" + "\n".join(
+                    ordered_records
+                )
+
+                def runner(argv):
+                    stdout = output if argv[0] == "avdmanager" else ""
+                    return ToolResult(tuple(argv), stdout, "", 0)
+
+                items, _ = analyze_android(runner, runner, 1, sdk)
+
+                self.assertEqual(
+                    [item.tool_action.resource for item in items], ["Keep"]
+                )
+
+    def test_same_detector_avd_path_collisions_are_omitted_in_both_orders(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            sdk = root / "sdk"
+            sdk.mkdir()
+            shared = root / "shared.avd"
+            keep = root / "keep.avd"
+            shared.mkdir()
+            keep.mkdir()
+            records = [
+                "Name: One\nPath: {}\nTarget: one".format(shared),
+                "Name: Keep\nPath: {}\nTarget: keep".format(keep),
+                "Name: Two\nPath: {}\nTarget: two".format(shared),
             ]
 
             for ordered_records in (records, list(reversed(records))):
@@ -703,10 +916,10 @@ cmake;1 | 1 | cmake | cmake/1
         self.assertEqual(len(unavailable), MAX_STDERR_CHARS)
         self.assertTrue(unavailable.endswith("...[truncated]"))
 
-    def test_cmdline_tool_dirs_are_deterministic_with_missing_entries(self):
+    def test_cmdline_tool_dirs_prioritize_latest_then_numeric_versions(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             sdk = Path(raw_tmp)
-            for version in ("9.0", "12.0", "latest"):
+            for version in ("9.0", "preview", "12.0", "alpha", "latest"):
                 (sdk / "cmdline-tools" / version).mkdir(parents=True)
             (sdk / "cmdline-tools" / "README").write_text("not a directory")
 
@@ -714,8 +927,10 @@ cmake;1 | 1 | cmake | cmake/1
                 cmdline_tool_dirs(sdk),
                 (
                     sdk / "cmdline-tools" / "latest" / "bin",
-                    sdk / "cmdline-tools" / "9.0" / "bin",
                     sdk / "cmdline-tools" / "12.0" / "bin",
+                    sdk / "cmdline-tools" / "9.0" / "bin",
+                    sdk / "cmdline-tools" / "alpha" / "bin",
+                    sdk / "cmdline-tools" / "preview" / "bin",
                     sdk / "tools" / "bin",
                 ),
             )

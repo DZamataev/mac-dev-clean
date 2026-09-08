@@ -15,6 +15,7 @@ from mac_dev_clean.tools.runner import (
     ToolResult,
     ToolUnavailable,
     find_binary,
+    inventory_argv_matches,
     run_tool,
 )
 
@@ -223,6 +224,55 @@ class ToolResultTests(unittest.TestCase):
         result = ToolResult(argv=("x",), stdout="a\n\nb\n", stderr="", exit_code=0)
 
         self.assertEqual(result.lines(), ["a", "b"])
+
+
+class InventoryArgvMatchesTests(unittest.TestCase):
+    def test_accepts_exact_tails_and_semantically_matching_executables(self):
+        cases = (
+            (("docker", "system", "df"), ("docker", "system", "df")),
+            (["docker", "system", "df"], ("docker", "system", "df")),
+            (("/usr/local/bin/docker", "system", "df"), ("docker", "system", "df")),
+            (
+                ("/opt/tools/../tools/brew", "cleanup", "-n"),
+                ("/opt/tools/brew", "cleanup", "-n"),
+            ),
+        )
+
+        for actual, requested in cases:
+            with self.subTest(actual=actual, requested=requested):
+                self.assertTrue(inventory_argv_matches(actual, requested))
+
+    def test_rejects_wrong_executables_and_argument_tails(self):
+        cases = (
+            (("podman", "system", "df"), ("docker", "system", "df")),
+            (("/usr/local/bin/podman", "system", "df"), ("docker", "system", "df")),
+            (("docker", "system", "df", "--verbose"), ("docker", "system", "df")),
+            (("docker", "system"), ("docker", "system", "df")),
+            (("/other/bin/brew", "cleanup"), ("/opt/bin/brew", "cleanup")),
+        )
+
+        for actual, requested in cases:
+            with self.subTest(actual=actual, requested=requested):
+                self.assertFalse(inventory_argv_matches(actual, requested))
+
+    def test_rejects_malformed_vectors_elements_and_nuls(self):
+        cases = (
+            "docker system df",
+            b"docker system df",
+            7,
+            {"docker", "system", "df"},
+            iter(("docker", "system", "df")),
+            (),
+            ("docker", 7, "df"),
+            ("docker", "system\x00suffix", "df"),
+            ("docker\x00suffix", "system", "df"),
+        )
+
+        for actual in cases:
+            with self.subTest(actual=actual):
+                self.assertFalse(
+                    inventory_argv_matches(actual, ("docker", "system", "df"))
+                )
 
 
 class PackageExportTests(unittest.TestCase):

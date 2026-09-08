@@ -12,7 +12,12 @@ from ..recommendation import (
     RestorationCost,
     ToolAction,
 )
-from .runner import MAX_STDERR_CHARS, ToolRunner, ToolUnavailable
+from .runner import (
+    MAX_STDERR_CHARS,
+    ToolRunner,
+    ToolUnavailable,
+    inventory_argv_matches,
+)
 from .sizes import parse_tool_size
 
 BREW_PREVIEW_ARGV = ("brew", "cleanup", "-n")
@@ -80,6 +85,10 @@ def analyze_homebrew(
         if detail:
             return [], _bounded_reason(detail)
         return [], _bounded_reason("brew exited with {}".format(result.exit_code))
+    if not inventory_argv_matches(result.argv, BREW_PREVIEW_ARGV):
+        return [], _bounded_reason(
+            "brew inventory provenance did not match requested command"
+        )
     total, count = parse_brew_preview(result.stdout)
     if total <= 0 and count == 0:
         return [], None

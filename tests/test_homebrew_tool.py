@@ -127,6 +127,35 @@ class AnalyzeHomebrewTests(unittest.TestCase):
         self.assertEqual(calls, [("brew", "cleanup", "-n")])
         self.assertEqual(calls, [BREW_PREVIEW_ARGV])
 
+    def test_successful_output_requires_matching_inventory_provenance(self):
+        bad_vectors = (
+            ("brew", "cleanup"),
+            ("other-brew", "cleanup", "-n"),
+            ["brew", "cleanup", "-n\x00suffix"],
+        )
+
+        for actual in bad_vectors:
+            with self.subTest(actual=actual):
+                def run(argv):
+                    return ToolResult(actual, REAL_OUTPUT, "", 0)
+
+                items, unavailable = analyze_homebrew(run, generation=1, home=HOME)
+
+                self.assertEqual(items, [])
+                self.assertIn("provenance", unavailable)
+                self.assertLessEqual(len(unavailable), MAX_STDERR_CHARS)
+
+    def test_accepts_resolved_inventory_executable_provenance(self):
+        def run(argv):
+            return ToolResult(
+                ("/opt/homebrew/bin/brew",) + tuple(argv[1:]), REAL_OUTPUT, "", 0
+            )
+
+        items, unavailable = analyze_homebrew(run, generation=1, home=HOME)
+
+        self.assertIsNone(unavailable)
+        self.assertEqual(len(items), 1)
+
     def test_nothing_reclaimable_produces_no_items_and_no_error(self):
         items, unavailable = analyze_homebrew(
             runner_returning("Warning: nothing to do\n"),
