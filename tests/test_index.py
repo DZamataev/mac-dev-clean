@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,6 +160,77 @@ class ScanIndexTests(unittest.TestCase):
             self.assertIsNone(rebuilt.load_recommendation(item.id))
         finally:
             rebuilt.close()
+
+
+class ToolRecommendationRoundTripTests(unittest.TestCase):
+    def test_a_tool_recommendation_survives_a_round_trip(self):
+        from mac_dev_clean.recommendation import ToolAction
+
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        index = open_index(Path(temp.name) / "index.sqlite3")
+        self.addCleanup(index.close)
+        index.begin_generation(VolumeIdentity(device=1, uuid="U"), event_id=1)
+        item = Recommendation(
+            detector_id="docker-build-cache",
+            category="tool-managed",
+            label="Docker build cache",
+            path=Path("/Users/test/home"),
+            action=ActionKind.INVOKE_TOOL,
+            allocated_bytes=1,
+            reclaimable_bytes=1,
+            confidence=Confidence.EXACT,
+            restoration=RestorationCost.EXTERNAL_STATE,
+            selected_by_default=False,
+            evidence=(),
+            safety_root=Path("/Users/test/home"),
+            reason="",
+            generation=1,
+            tool_action=ToolAction(
+                tool="docker",
+                resource="build-cache",
+                argv=("docker", "builder", "prune", "--filter=label=a b", "-f"),
+                preview_argv=(
+                    "docker",
+                    "system",
+                    "df",
+                    "--format",
+                    "{{json .}}",
+                ),
+                reported="7.499GB",
+            ),
+        )
+        index.record_recommendation(item)
+        index.complete_generation()
+
+        loaded = index.load_recommendation(item.id)
+
+        self.assertIsNotNone(loaded.tool_action)
+        self.assertEqual(loaded.tool_action, item.tool_action)
+
+    def test_existing_path_recommendation_without_tool_action_key_decodes(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        index = open_index(Path(temp.name) / "index.sqlite3")
+        self.addCleanup(index.close)
+        generation = index.begin_generation(
+            VolumeIdentity(device=1, uuid="U"), event_id=1
+        )
+        item = build_recommendation(generation)
+        index.record_recommendation(item)
+        payload = item.to_dict()
+        del payload["tool_action"]
+        index.execute_for_test(
+            "UPDATE recommendations SET payload = ? WHERE id = ? AND generation = ?",
+            (json.dumps(payload), item.id, generation),
+        )
+        index.complete_generation()
+
+        loaded = index.load_recommendation(item.id)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.action, ActionKind.DELETE_TREE)
+        self.assertIsNone(loaded.tool_action)
 
 
 if __name__ == "__main__":

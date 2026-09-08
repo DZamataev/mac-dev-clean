@@ -48,6 +48,46 @@ class Evidence:
         return {"code": self.code, "detail": self.detail}
 
 
+@dataclass(frozen=True)
+class ToolAction:
+    """The exact commands behind a tool-managed recommendation.
+
+    ``preview_argv`` is re-run immediately before ``argv`` executes, because a
+    tool's internal state can change between the scan and the confirmation in
+    a way no filesystem check can detect. Both vectors are frozen here at
+    analysis time so nothing downstream can widen them.
+    """
+
+    tool: str
+    resource: str
+    argv: Tuple[str, ...]
+    preview_argv: Tuple[str, ...]
+    reported: str = ""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.argv, (str, bytes)):
+            raise TypeError("argv must be a sequence of argument strings")
+        if isinstance(self.preview_argv, (str, bytes)):
+            raise TypeError("preview_argv must be a sequence of argument strings")
+        argv = tuple(self.argv)
+        preview_argv = tuple(self.preview_argv)
+        if not argv:
+            raise ValueError("argv must not be empty")
+        if not preview_argv:
+            raise ValueError("preview_argv must not be empty")
+        object.__setattr__(self, "argv", argv)
+        object.__setattr__(self, "preview_argv", preview_argv)
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "tool": self.tool,
+            "resource": self.resource,
+            "argv": list(self.argv),
+            "preview_argv": list(self.preview_argv),
+            "reported": self.reported,
+        }
+
+
 def normalized_path(path: Path) -> str:
     """Lexical normalization only. Never resolves symlinks: two different
     symlinks pointing at one target must keep distinct identities so the
@@ -80,9 +120,14 @@ class Recommendation:
     reason: str
     generation: int
     last_activity_at: Optional[datetime] = None
+    tool_action: Optional[ToolAction] = None
     warning: str = ""
 
     def __post_init__(self) -> None:
+        if self.action is ActionKind.INVOKE_TOOL and self.tool_action is None:
+            raise ValueError("invoke_tool recommendations require a tool_action")
+        if self.action is not ActionKind.INVOKE_TOOL and self.tool_action is not None:
+            raise ValueError("only invoke_tool recommendations accept a tool_action")
         eligible = (
             self.action in DESTRUCTIVE_ACTIONS
             and self.confidence is not Confidence.UNKNOWN
@@ -116,4 +161,5 @@ class Recommendation:
             "last_activity_at": self.last_activity_at.astimezone(timezone.utc).isoformat()
             if self.last_activity_at
             else None,
+            "tool_action": self.tool_action.to_dict() if self.tool_action else None,
         }

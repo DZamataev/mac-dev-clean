@@ -15,6 +15,7 @@ from .recommendation import (
     Evidence,
     Recommendation,
     RestorationCost,
+    ToolAction,
 )
 
 SCHEMA_VERSION = 1
@@ -169,6 +170,18 @@ class ScanIndex:
 
 def _decode(payload: dict) -> Recommendation:
     raw_activity = payload.get("last_activity_at")
+    raw_tool = payload.get("tool_action")
+    tool_action = (
+        ToolAction(
+            tool=raw_tool["tool"],
+            resource=raw_tool["resource"],
+            argv=tuple(raw_tool["argv"]),
+            preview_argv=tuple(raw_tool["preview_argv"]),
+            reported=raw_tool.get("reported", ""),
+        )
+        if raw_tool
+        else None
+    )
     return Recommendation(
         detector_id=payload["detector_id"],
         category=payload["category"],
@@ -187,6 +200,7 @@ def _decode(payload: dict) -> Recommendation:
         reason=payload.get("reason", ""),
         generation=int(payload["generation"]),
         last_activity_at=datetime.fromisoformat(raw_activity) if raw_activity else None,
+        tool_action=tool_action,
         warning=payload.get("warning", ""),
     )
 
