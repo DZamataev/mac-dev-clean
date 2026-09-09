@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+from dataclasses import replace
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
+from .journal import ActionJournal, JournalRecord, append_with_warning
 from .model import CleanResult, ScanTarget
+from .recommendation import normalized_path
 from .sim_prune import (
     SimctlError,
     delete_test_clones,
@@ -128,11 +131,49 @@ FIXED_CATEGORY_SUFFIXES = {
 }
 
 
-def clean_targets(targets: Iterable[ScanTarget], dry_run: bool = False) -> List[CleanResult]:
-    return [clean_target(target, dry_run=dry_run) for target in targets]
+def clean_targets(
+    targets: Iterable[ScanTarget],
+    dry_run: bool = False,
+    journal: Optional[ActionJournal] = None,
+) -> List[CleanResult]:
+    return [clean_target(target, dry_run=dry_run, journal=journal) for target in targets]
 
 
-def clean_target(target: ScanTarget, dry_run: bool = False) -> CleanResult:
+def clean_target(
+    target: ScanTarget,
+    dry_run: bool = False,
+    journal: Optional[ActionJournal] = None,
+) -> CleanResult:
+    result = _clean_target_unjournalled(target, dry_run=dry_run)
+    if journal is not None:
+        warning = append_with_warning(
+            journal,
+            JournalRecord(
+                recommendation_id="",
+                detector_id=target.category,
+                category=target.category,
+                target=normalized_path(target.path),
+                action=target.delete_mode,
+                outcome=_journal_outcome(result),
+                reclaimable_bytes=target.size_bytes,
+                dry_run=result.dry_run,
+                detail=result.error,
+            ),
+        )
+        if warning:
+            result = replace(result, journal_warning=warning)
+    return result
+
+
+def _journal_outcome(result: CleanResult) -> str:
+    if result.error:
+        return "failed"
+    if result.dry_run or not result.removed:
+        return "skipped"
+    return "removed"
+
+
+def _clean_target_unjournalled(target: ScanTarget, dry_run: bool = False) -> CleanResult:
     error = validate_target(target)
     if error:
         return _result(target, dry_run=dry_run, removed=False, error=error)

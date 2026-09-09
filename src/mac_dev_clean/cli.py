@@ -362,7 +362,8 @@ def run_clean(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         categories=selected,
     )
     targets = [item for item in items if item.category in selected and item.cleanable]
-    results = clean_targets(targets, dry_run=args.dry_run)
+    journal = open_journal()
+    results = clean_targets(targets, dry_run=args.dry_run, journal=journal)
     print(clean_report_json(results) if args.json else render_clean_table(results))
     return 1 if any(result.error for result in results) else 0
 
@@ -396,7 +397,8 @@ def run_interactive(args: argparse.Namespace, parser: argparse.ArgumentParser) -
         print("Canceled. Nothing deleted.")
         return 0
 
-    results = clean_targets(targets)
+    journal = open_journal()
+    results = clean_targets(targets, journal=journal)
     print(render_clean_table(results))
     return 1 if any(result.error for result in results) else 0
 

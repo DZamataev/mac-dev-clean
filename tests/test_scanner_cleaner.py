@@ -1,12 +1,15 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import os
 import unittest
 from unittest.mock import patch
 
-from mac_dev_clean.cleaner import clean_target, validate_category_path
+from mac_dev_clean.cleaner import clean_target, clean_targets, validate_category_path
+from mac_dev_clean.journal import ActionJournal
 from mac_dev_clean.model import ScanTarget
+from mac_dev_clean.recommendation import normalized_path
 from mac_dev_clean.scanner import _location_measurement, _unique_targets, find_node_modules, scan
 from mac_dev_clean.sim_prune import Device, Inventory
 
@@ -447,6 +450,179 @@ class ScannerCleanerTests(unittest.TestCase):
             )
 
             self.assertEqual([item for item in items if item.category == "node-modules"], [])
+
+
+class CleanerJournalTests(unittest.TestCase):
+    def _target(self, root: Path) -> ScanTarget:
+        cache = root / "Library/Caches/Homebrew"
+        cache.mkdir(parents=True)
+        (cache / "blob").write_bytes(b"x" * 16)
+        return ScanTarget(
+            category="brew-cache",
+            label="Homebrew cache",
+            path=cache,
+            size_bytes=16,
+            modified_at=None,
+            cleanable=True,
+            delete_mode="contents",
+            safety_root=root,
+        )
+
+    def test_successful_cleanup_is_journalled_once_with_truthful_fields(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "home"
+            root.mkdir()
+            target = self._target(root)
+            journal_path = Path(temp) / "actions.jsonl"
+
+            result = clean_target(target, journal=ActionJournal(journal_path))
+
+            records = [
+                json.loads(line)
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(result.removed)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["recommendation_id"], "")
+            self.assertEqual(records[0]["detector_id"], target.category)
+            self.assertEqual(records[0]["category"], target.category)
+            self.assertEqual(records[0]["target"], normalized_path(target.path))
+            self.assertEqual(records[0]["action"], target.delete_mode)
+            self.assertEqual(records[0]["outcome"], "removed")
+            self.assertFalse(records[0]["dry_run"])
+
+    def test_clean_targets_uses_one_injected_journal_for_each_result(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "home"
+            root.mkdir()
+            first = self._target(root)
+            second_path = root / ".npm/_cacache"
+            second_path.mkdir(parents=True)
+            (second_path / "blob").write_bytes(b"y")
+            second = ScanTarget(
+                category="npm-cache",
+                label="npm cache",
+                path=second_path,
+                size_bytes=1,
+                modified_at=None,
+                cleanable=True,
+                delete_mode="contents",
+                safety_root=root,
+            )
+            journal_path = Path(temp) / "actions.jsonl"
+
+            results = clean_targets(
+                [first, second],
+                dry_run=True,
+                journal=ActionJournal(journal_path),
+            )
+
+            records = [
+                json.loads(line)
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(results), 2)
+            self.assertEqual(len(records), 2)
+            self.assertEqual(
+                [record["category"] for record in records],
+                ["brew-cache", "npm-cache"],
+            )
+
+    def test_dry_run_is_journalled_once_as_skipped_without_deleting(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "home"
+            root.mkdir()
+            target = self._target(root)
+            payload = target.path / "blob"
+            journal_path = Path(temp) / "actions.jsonl"
+
+            result = clean_target(
+                target, dry_run=True, journal=ActionJournal(journal_path)
+            )
+
+            records = [
+                json.loads(line)
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertFalse(result.removed)
+            self.assertTrue(payload.exists())
+            self.assertEqual(len(records), 1)
+            self.assertTrue(records[0]["dry_run"])
+            self.assertEqual(records[0]["outcome"], "skipped")
+
+    def test_refusal_is_journalled_once_as_failed_with_reason(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "home"
+            root.mkdir()
+            target = ScanTarget(
+                category="xcode-archives",
+                label="Xcode Archives",
+                path=root / "Library/Developer/Xcode/Archives",
+                size_bytes=1,
+                modified_at=None,
+                cleanable=False,
+                delete_mode="none",
+                safety_root=root,
+            )
+            journal_path = Path(temp) / "actions.jsonl"
+
+            result = clean_target(target, journal=ActionJournal(journal_path))
+
+            records = [
+                json.loads(line)
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("report-only", result.error)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["action"], "none")
+            self.assertEqual(records[0]["outcome"], "failed")
+            self.assertEqual(records[0]["detail"], result.error)
+
+    def test_cleanup_error_is_journalled_once_as_failed(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "home"
+            root.mkdir()
+            target = self._target(root)
+            journal_path = Path(temp) / "actions.jsonl"
+
+            with patch(
+                "mac_dev_clean.cleaner._remove_contents",
+                side_effect=OSError("synthetic cleanup failure"),
+            ):
+                result = clean_target(target, journal=ActionJournal(journal_path))
+
+            records = [
+                json.loads(line)
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertFalse(result.removed)
+            self.assertIn("synthetic cleanup failure", result.error)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["outcome"], "failed")
+            self.assertEqual(records[0]["detail"], result.error)
+
+    def test_journal_failure_is_safe_nonfatal_and_serialized(self):
+        class BrokenJournal(ActionJournal):
+            def append(self, record):
+                raise RuntimeError("secret /Users/test/private/actions.jsonl")
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "home"
+            root.mkdir()
+            target = self._target(root)
+
+            result = clean_target(
+                target, journal=BrokenJournal(Path(temp) / "actions.jsonl")
+            )
+
+            self.assertTrue(result.removed)
+            self.assertEqual(result.error, "")
+            self.assertEqual(result.journal_warning, "journal write failed")
+            self.assertEqual(
+                result.to_dict()["journal_warning"], "journal write failed"
+            )
+            self.assertNotIn("private", result.journal_warning)
+            self.assertNotIn(str(temp), result.journal_warning)
 
 
 if __name__ == "__main__":

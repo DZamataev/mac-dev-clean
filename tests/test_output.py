@@ -3,7 +3,12 @@ import unittest
 from pathlib import Path
 
 from mac_dev_clean.model import CleanResult, ScanTarget
-from mac_dev_clean.output import render_clean_table, render_scan_table, scan_report_json
+from mac_dev_clean.output import (
+    clean_report_json,
+    render_clean_table,
+    render_scan_table,
+    scan_report_json,
+)
 
 
 class OutputTests(unittest.TestCase):
@@ -108,6 +113,39 @@ class OutputTests(unittest.TestCase):
 
         self.assertIn("delete requested", output)
         self.assertIn("APFS may reclaim shared blocks in the background", output)
+
+    def test_clean_output_surfaces_safe_journal_warning_in_text_and_json(self):
+        result = CleanResult(
+            category="brew-cache",
+            label="Homebrew cache",
+            path=Path("/tmp/home/Library/Caches/Homebrew"),
+            size_bytes=10,
+            dry_run=False,
+            removed=True,
+            journal_warning="journal write failed",
+        )
+
+        text = render_clean_table([result])
+        payload = json.loads(clean_report_json([result]))
+
+        self.assertIn("journal write failed", text)
+        self.assertEqual(
+            payload["items"][0]["journal_warning"], "journal write failed"
+        )
+        self.assertNotIn("/Users/", text)
+
+    def test_clean_result_construction_without_journal_warning_remains_compatible(self):
+        result = CleanResult(
+            category="brew-cache",
+            label="Homebrew cache",
+            path=Path("/tmp/home/Library/Caches/Homebrew"),
+            size_bytes=10,
+            dry_run=False,
+            removed=True,
+        )
+
+        self.assertEqual(result.journal_warning, "")
+        self.assertEqual(result.to_dict()["journal_warning"], "")
 
     def test_report_only_items_include_review_guidance(self):
         target = ScanTarget(

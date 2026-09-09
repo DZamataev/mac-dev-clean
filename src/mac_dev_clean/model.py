@@ -43,6 +43,7 @@ class CleanResult:
     dry_run: bool
     removed: bool
     error: str = ""
+    journal_warning: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -54,6 +55,7 @@ class CleanResult:
             "dry_run": self.dry_run,
             "removed": self.removed,
             "error": self.error,
+            "journal_warning": self.journal_warning,
         }
 
 

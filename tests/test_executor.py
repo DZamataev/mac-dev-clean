@@ -294,6 +294,25 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(records[0]["target"], "docker:build-cache")
         self.assertEqual(records[1]["target"], str(self.artifact))
 
+    def test_path_only_apply_writes_exactly_one_existing_apply_row(self):
+        journal_path = self.home / "path-actions.jsonl"
+
+        results = apply_recommendations(
+            [self.item.id],
+            self.index,
+            now=NOW,
+            journal=ActionJournal(journal_path),
+        )
+
+        records = [
+            json.loads(line)
+            for line in journal_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(results[0].outcome, ApplyOutcome.REMOVED)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["recommendation_id"], self.item.id)
+        self.assertEqual(records[0]["action"], self.item.action.value)
+
     def test_path_apply_surfaces_a_nonfatal_journal_failure(self):
         class BrokenJournal(ActionJournal):
             def append(self, record):

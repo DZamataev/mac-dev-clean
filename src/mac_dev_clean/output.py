@@ -170,13 +170,14 @@ def render_clean_table(results: Iterable[CleanResult]) -> str:
             status = "removed"
         else:
             status = "skipped"
-        entries.append(
-            _render_entry(
-                f"{status}  |  {item.category}  |  "
-                f"{_display_size(item.category, item.size_bytes)}",
-                item.path,
-            )
+        entry = _render_entry(
+            f"{status}  |  {item.category}  |  "
+            f"{_display_size(item.category, item.size_bytes)}",
+            item.path,
         )
+        if item.journal_warning:
+            entry += "\n    Warning: journal write failed"
+        entries.append(entry)
 
     body = _section("Cleanup results", "\n\n".join(entries))
     total = human_bytes(sum(_counted_size(item) for item in items if not item.error))
