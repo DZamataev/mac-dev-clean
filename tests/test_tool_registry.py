@@ -140,12 +140,67 @@ class BinaryRunnerTests(unittest.TestCase):
                 "mac_dev_clean.tools.registry.run_tool", fake_run
             ):
                 binary_runner(
-                    "sdkmanager", (reviewed_bin,), allow_fallback=False
+                    "sdkmanager",
+                    (reviewed_bin,),
+                    allow_fallback=False,
+                    containment_root=reviewed_bin.parent,
                 )(("sdkmanager", "--list_installed"))
 
             find.assert_not_called()
             self.assertEqual(
-                captured, [(str(executable), "--list_installed")]
+                captured, [(str(executable.resolve()), "--list_installed")]
+            )
+
+    def test_strict_resolution_rejects_a_symlink_outside_the_reviewed_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            reviewed_sdk = root / "sdk-a"
+            reviewed_bin = reviewed_sdk / "cmdline-tools" / "latest" / "bin"
+            reviewed_bin.mkdir(parents=True)
+            outside = root / "sdk-b" / "bin" / "sdkmanager"
+            outside.parent.mkdir(parents=True)
+            outside.write_text("#!/bin/sh\n", encoding="utf-8")
+            outside.chmod(0o755)
+            (reviewed_bin / "sdkmanager").symlink_to(outside)
+
+            with patch("mac_dev_clean.tools.registry.run_tool") as run:
+                with self.assertRaises(ToolUnavailable):
+                    binary_runner(
+                        "sdkmanager",
+                        (reviewed_bin,),
+                        allow_fallback=False,
+                        containment_root=reviewed_sdk,
+                    )(("sdkmanager", "--list_installed"))
+
+            run.assert_not_called()
+
+    def test_strict_resolution_allows_an_internal_version_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            reviewed_sdk = (Path(temp) / "sdk-a").resolve()
+            version_bin = reviewed_sdk / "cmdline-tools" / "12.0" / "bin"
+            version_bin.mkdir(parents=True)
+            executable = version_bin / "sdkmanager"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            latest = reviewed_sdk / "cmdline-tools" / "latest"
+            latest.symlink_to(version_bin.parent, target_is_directory=True)
+            reviewed_bin = latest / "bin"
+            captured = []
+
+            def fake_run(argv):
+                captured.append(tuple(argv))
+                return ToolResult(tuple(argv), "ok", "", 0)
+
+            with patch("mac_dev_clean.tools.registry.run_tool", fake_run):
+                binary_runner(
+                    "sdkmanager",
+                    (reviewed_bin,),
+                    allow_fallback=False,
+                    containment_root=reviewed_sdk,
+                )(("sdkmanager", "--list_installed"))
+
+            self.assertEqual(
+                captured, [(str(executable.resolve()), "--list_installed")]
             )
 
     def test_missing_declared_binary_raises_unavailable(self):

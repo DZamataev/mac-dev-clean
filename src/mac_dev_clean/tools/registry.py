@@ -70,12 +70,14 @@ def binary_runner(
     name: str,
     extra_dirs: Tuple[Path, ...] = (),
     allow_fallback: bool = True,
+    containment_root: Optional[Path] = None,
 ) -> ToolRunner:
     """Return a runner permanently bound to one declared executable.
 
-    ``allow_fallback=False`` confines resolution to ``extra_dirs``. Apply uses
+    ``allow_fallback=False`` confines resolution to ``extra_dirs`` and requires
+    the resolved executable to remain under ``containment_root``. Apply uses
     that mode for sdkmanager so a stale recommendation cannot fall through to
-    another SDK on PATH after the reviewed SDK's binary disappears.
+    another SDK on PATH or through an escaping symlink.
     """
     if not isinstance(name, str):
         raise TypeError("binary name must be a string")
@@ -83,8 +85,13 @@ def binary_runner(
         raise ValueError("binary name must not be empty")
     if "\x00" in name:
         raise ValueError("binary name must not contain NUL")
+    if not allow_fallback and containment_root is None:
+        raise ValueError("strict binary resolution requires a containment root")
 
     search_dirs = tuple(extra_dirs) + (_STANDARD_BINARY_DIRS if allow_fallback else ())
+    resolved_root = (
+        Path(containment_root).resolve() if containment_root is not None else None
+    )
 
     def resolve() -> Optional[str]:
         if allow_fallback:
@@ -92,8 +99,17 @@ def binary_runner(
         for directory in search_dirs:
             candidate = Path(directory) / name
             try:
-                if candidate.is_file() and os.access(str(candidate), os.X_OK):
-                    return str(candidate)
+                resolved_candidate = candidate.resolve(strict=True)
+                if resolved_root is None:
+                    continue
+                resolved_candidate.relative_to(resolved_root)
+                if resolved_candidate.is_file() and os.access(
+                    str(resolved_candidate), os.X_OK
+                ):
+                    # Execute the path whose containment was checked. Reusing
+                    # the lexical symlink would reopen a swap between the
+                    # check above and process creation.
+                    return str(resolved_candidate)
             except (OSError, RuntimeError, ValueError):
                 continue
         return None

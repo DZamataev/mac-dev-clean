@@ -195,6 +195,7 @@ def _default_runner(item: Recommendation) -> ToolRunner:
             executable,
             extra_dirs=cmdline_tool_dirs(item.safety_root),
             allow_fallback=False,
+            containment_root=item.safety_root,
         )
     if os.path.basename(executable) == "avdmanager":
         sdk_root = find_sdk_root(dict(os.environ), Path.home())

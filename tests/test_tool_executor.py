@@ -2060,9 +2060,14 @@ class AndroidSdkBindingTests(unittest.TestCase):
             bound_roots = []
             fallback_modes = []
 
-            def bind(name, extra_dirs=(), allow_fallback=True):
+            containment_roots = []
+
+            def bind(
+                name, extra_dirs=(), allow_fallback=True, containment_root=None
+            ):
                 bound_roots.append(tuple(extra_dirs))
                 fallback_modes.append(allow_fallback)
+                containment_roots.append(containment_root)
                 return runner
 
             with patch("mac_dev_clean.tool_executor.find_sdk_root", return_value=current_sdk), patch(
@@ -2074,6 +2079,7 @@ class AndroidSdkBindingTests(unittest.TestCase):
             self.assertTrue(all(str(path).startswith(str(reviewed_sdk)) for path in bound_roots[0]))
             self.assertFalse(any(str(path).startswith(str(current_sdk)) for path in bound_roots[0]))
             self.assertEqual(fallback_modes, [False])
+            self.assertEqual(containment_roots, [reviewed_sdk])
 
 
 if __name__ == "__main__":
