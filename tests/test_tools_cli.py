@@ -594,9 +594,9 @@ class JournalCommandTests(unittest.TestCase):
         third = {"target": "third"}
         self.path.write_bytes(
             json.dumps(first).encode("utf-8")
-            + b"\n\xff\nnot-json\n[]\n"
-            + json.dumps(second).encode("utf-8")
             + b"\n"
+            + json.dumps(second).encode("utf-8")
+            + b"\n\xff\nnot-json\n[]\n"
             + json.dumps(third).encode("utf-8")
             + b"\n"
         )
