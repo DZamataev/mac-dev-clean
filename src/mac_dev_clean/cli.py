@@ -5,17 +5,27 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence, Set
+from typing import Dict, Optional, Sequence, Set
 
 from .age import parse_age
 from .cleaner import clean_targets
 from .deep_scan import deep_scan, default_deep_scan_roots
 from .events import EventEmitter
 from .executor import ApplyOutcome, apply_recommendations
-from .index import open_index
+from .fsevents import VolumeIdentity
+from .index import DEFAULT_TOOL_INDEX_PATH, open_index
 from .journal import open_journal
-from .output import clean_report_json, render_clean_table, render_scan_table, scan_report_json
+from .output import (
+    clean_report_json,
+    render_clean_table,
+    render_scan_table,
+    render_tool_table,
+    scan_report_json,
+    tool_report_json,
+)
 from .scanner import scan
+from .tool_executor import invoke_tool_recommendations
+from .tools.registry import collect_tool_recommendations
 
 
 FLAG_TO_CATEGORIES = {
@@ -79,6 +89,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_apply(args, parser)
         if args.command == "reset-index":
             return run_reset_index(args)
+        if args.command == "tools":
+            return run_tools(args)
+        if args.command == "tools-apply":
+            return run_tools_apply(args)
+        if args.command == "journal":
+            return run_journal(args)
         if args.command in {None, "interactive"}:
             return run_interactive(args, parser)
     except ValueError as exc:
@@ -305,7 +321,64 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reset_parser.add_argument("--index", type=Path, default=None, help="Index database path.")
 
+    tools_parser = subparsers.add_parser(
+        "tools",
+        help="Report storage managed by Docker, Homebrew, Android tools, and simctl.",
+    )
+    tools_parser.add_argument(
+        "--index",
+        type=Path,
+        default=None,
+        help="Dedicated tool recommendation index path.",
+    )
+    tools_parser.add_argument("--json", action="store_true", help="Print JSON output.")
+
+    tools_apply_parser = subparsers.add_parser(
+        "tools-apply",
+        help="Run one tool-managed action by recommendation id.",
+    )
+    tools_apply_parser.add_argument("--id", required=True, help="Recommendation id.")
+    tools_apply_parser.add_argument(
+        "--index",
+        type=Path,
+        default=None,
+        help="Dedicated tool recommendation index path.",
+    )
+    tools_apply_parser.add_argument(
+        "--journal", type=Path, default=None, help="Action journal path."
+    )
+    tools_apply_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview the command without running it."
+    )
+    tools_apply_parser.add_argument(
+        "--json", action="store_true", help="Print JSON output."
+    )
+
+    journal_parser = subparsers.add_parser(
+        "journal", help="Show or clear the local action journal."
+    )
+    journal_parser.add_argument(
+        "--journal", type=Path, default=None, help="Action journal path."
+    )
+    journal_parser.add_argument(
+        "--tail", type=_positive_int, help="Show only the last N records."
+    )
+    journal_parser.add_argument(
+        "--clear", action="store_true", help="Delete active and rotated journals."
+    )
+    journal_parser.add_argument("--json", action="store_true", help="Print JSON output.")
+
     return parser
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
 
 
 def add_scan_options(parser: argparse.ArgumentParser) -> None:
@@ -475,6 +548,161 @@ def run_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
     failed = any(item.outcome is ApplyOutcome.FAILED for item in results)
     return 1 if failed else 0
+
+
+def run_tools(args: argparse.Namespace) -> int:
+    index_path = args.index if args.index is not None else DEFAULT_TOOL_INDEX_PATH.expanduser()
+    index = None
+    report = None
+    started = False
+    failed_safely = False
+    try:
+        index = open_index(index_path)
+        generation = index.begin_generation(VolumeIdentity(device=0, uuid=None), event_id=0)
+        started = True
+        report = collect_tool_recommendations(generation=generation, home=Path.home())
+        for item in report.recommendations:
+            index.record_recommendation(item)
+        index.complete_generation()
+        started = False
+    except Exception:
+        failed_safely = True
+        if index is not None and started:
+            try:
+                index.abandon_generation()
+            except Exception:
+                pass
+    finally:
+        if index is not None:
+            try:
+                index.close()
+            except Exception:
+                failed_safely = True
+
+    if failed_safely or report is None:
+        message = "Could not collect tool-managed storage."
+        if args.json:
+            print(json.dumps({"error": message}, indent=2, sort_keys=True))
+        else:
+            print(message)
+        return 1
+
+    if args.json:
+        print(json.dumps(tool_report_json(report), indent=2, sort_keys=True))
+    else:
+        print(render_tool_table(report))
+    return 0
+
+
+def run_tools_apply(args: argparse.Namespace) -> int:
+    index_path = args.index if args.index is not None else DEFAULT_TOOL_INDEX_PATH.expanduser()
+    index = None
+    results = None
+    failed_safely = False
+    close_warning = ""
+    try:
+        index = open_index(index_path)
+        journal = open_journal(args.journal) if args.journal is not None else open_journal()
+        results = invoke_tool_recommendations(
+            [args.id], index, journal, dry_run=args.dry_run
+        )
+    except Exception:
+        failed_safely = True
+    finally:
+        if index is not None:
+            try:
+                index.close()
+            except Exception:
+                close_warning = "Could not close the tool recommendation index."
+
+    if failed_safely or results is None:
+        message = "Could not apply the tool-managed recommendation."
+        if args.json:
+            print(json.dumps({"error": message, "results": []}, indent=2, sort_keys=True))
+        else:
+            print(message)
+        return 1
+
+    if args.json:
+        payload = {  # type: Dict[str, object]
+            "results": [result.to_dict() for result in results]
+        }
+        if close_warning:
+            payload["warning"] = close_warning
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for result in results:
+            print("{}: {}".format(result.outcome.value, result.label or args.id))
+            if result.reported:
+                print("  reported: {}".format(result.reported))
+            if result.error:
+                print("  error: {}".format(result.error))
+            if result.journal_warning:
+                print("  warning: {}".format(result.journal_warning))
+        if close_warning:
+            print("warning: {}".format(close_warning))
+
+    return 1 if any(result.outcome is ApplyOutcome.FAILED for result in results) else 0
+
+
+def run_journal(args: argparse.Namespace) -> int:
+    try:
+        journal = open_journal(args.journal) if args.journal is not None else open_journal()
+    except Exception:
+        message = "Could not open the action journal."
+        if args.json:
+            print(json.dumps({"error": message, "records": []}, indent=2, sort_keys=True))
+        else:
+            print(message)
+        return 1
+
+    path = journal.path
+    if args.clear:
+        failed = False
+        for candidate in (path, path.with_name(path.name + ".1")):
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                failed = True
+        if failed:
+            print("Could not clear one or more journal files.")
+            return 1
+        return 0
+
+    records = []
+    try:
+        with open(str(path), "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+    except OSError:
+        records = []
+
+    if args.tail is not None:
+        records = records[-args.tail :]
+
+    if args.json:
+        print(json.dumps({"records": records}, indent=2, sort_keys=True))
+    else:
+        for record in records:
+            print(
+                "{}  {:<18}  {}  {}".format(
+                    record.get("timestamp", ""),
+                    record.get("outcome", ""),
+                    "(dry run)" if record.get("dry_run") else "         ",
+                    record.get("target", ""),
+                )
+            )
+    return 0
 
 
 def run_reset_index(args: argparse.Namespace) -> int:

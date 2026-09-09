@@ -21,6 +21,7 @@ from .recommendation import (
 SCHEMA_VERSION = 1
 
 DEFAULT_INDEX_PATH = Path("~/Library/Caches/mac-dev-clean/index.sqlite3")
+DEFAULT_TOOL_INDEX_PATH = Path("~/Library/Caches/mac-dev-clean/tools.sqlite3")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (

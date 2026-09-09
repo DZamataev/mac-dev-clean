@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import shlex
 import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Set, Tuple
 
 from .model import CleanResult, ScanTarget, human_bytes
 
@@ -90,6 +91,63 @@ SCAN_RECOMMENDATIONS: Tuple[Tuple[str, Set[str], str], ...] = (
         "mac-dev-clean clean --node-modules --older-than 60d --dry-run",
     ),
 )
+
+
+def tool_report_json(report) -> Dict[str, object]:
+    recommendations = sorted(
+        report.recommendations,
+        key=lambda item: (-item.reclaimable_bytes, item.id),
+    )
+    statuses = sorted(
+        report.statuses,
+        key=lambda status: (status.tool, 0 if status.available else 1, status.reason),
+    )
+    return {
+        "recommendations": [item.to_dict() for item in recommendations],
+        "statuses": [status.to_dict() for status in statuses],
+        "reclaimable_total_bytes": sum(
+            item.reclaimable_bytes for item in recommendations
+        ),
+    }
+
+
+def render_tool_table(report) -> str:
+    lines = ["Tool-managed storage", ""]  # type: List[str]
+    for status in sorted(
+        report.statuses,
+        key=lambda entry: (entry.tool, 0 if entry.available else 1, entry.reason),
+    ):
+        if status.available:
+            lines.append("{}: available".format(status.tool))
+        else:
+            lines.append("{}: unavailable ({})".format(status.tool, status.reason))
+    lines.append("")
+
+    recommendations = sorted(
+        report.recommendations,
+        key=lambda item: (-item.reclaimable_bytes, item.id),
+    )
+    if not recommendations:
+        lines.append("No tool reported reclaimable storage.")
+        lines.append("Nothing is selected.")
+        return "\n".join(lines)
+
+    for item in recommendations:
+        lines.append(
+            "{:>10}  {}  [{}]".format(
+                human_bytes(item.reclaimable_bytes), item.label, item.id
+            )
+        )
+        lines.append("            runs: {}".format(shlex.join(item.tool_action.argv)))
+    total = sum(item.reclaimable_bytes for item in recommendations)
+    lines.extend(
+        [
+            "",
+            "Reported reclaimable: {}".format(human_bytes(total)),
+            "Nothing is selected. Apply one with: mac-dev-clean tools-apply --id <id> --dry-run",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def scan_report_json(items: Iterable[ScanTarget]) -> str:
