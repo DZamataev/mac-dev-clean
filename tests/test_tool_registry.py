@@ -123,6 +123,31 @@ class BinaryRunnerTests(unittest.TestCase):
             ],
         )
 
+    def test_strict_resolution_never_falls_through_to_path_or_standard_dirs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            reviewed_bin = Path(temp) / "reviewed" / "bin"
+            reviewed_bin.mkdir(parents=True)
+            executable = reviewed_bin / "sdkmanager"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            captured = []
+
+            def fake_run(argv):
+                captured.append(tuple(argv))
+                return ToolResult(tuple(argv), "ok", "", 0)
+
+            with patch("mac_dev_clean.tools.registry.find_binary") as find, patch(
+                "mac_dev_clean.tools.registry.run_tool", fake_run
+            ):
+                binary_runner(
+                    "sdkmanager", (reviewed_bin,), allow_fallback=False
+                )(("sdkmanager", "--list_installed"))
+
+            find.assert_not_called()
+            self.assertEqual(
+                captured, [(str(executable), "--list_installed")]
+            )
+
     def test_missing_declared_binary_raises_unavailable(self):
         with patch("mac_dev_clean.tools.registry.find_binary", return_value=None):
             with self.assertRaises(ToolUnavailable) as raised:

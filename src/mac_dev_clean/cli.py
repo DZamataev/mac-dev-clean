@@ -13,6 +13,7 @@ from .deep_scan import deep_scan, default_deep_scan_roots
 from .events import EventEmitter
 from .executor import ApplyOutcome, apply_recommendations
 from .index import open_index
+from .journal import open_journal
 from .output import clean_report_json, render_clean_table, render_scan_table, scan_report_json
 from .scanner import scan
 
@@ -445,9 +446,13 @@ def run_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         parser.error("apply requires at least one --id")
 
     index = open_index(args.index)
+    journal = open_journal()
     try:
         results = apply_recommendations(
-            args.recommendation_id, index, dry_run=args.dry_run
+            args.recommendation_id,
+            index,
+            dry_run=args.dry_run,
+            journal=journal,
         )
     finally:
         index.close()
@@ -462,8 +467,9 @@ def run_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         )
     else:
         for item in results:
-            detail = " — {}".format(item.error) if item.error else ""
-            print("{:<20} {}{}".format(item.outcome.value, item.path, detail))
+            details = [detail for detail in (item.error, item.journal_warning) if detail]
+            suffix = " — {}".format("; ".join(details)) if details else ""
+            print("{:<20} {}{}".format(item.outcome.value, item.path, suffix))
 
     failed = any(item.outcome is ApplyOutcome.FAILED for item in results)
     return 1 if failed else 0

@@ -294,6 +294,25 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(records[0]["target"], "docker:build-cache")
         self.assertEqual(records[1]["target"], str(self.artifact))
 
+    def test_path_apply_surfaces_a_nonfatal_journal_failure(self):
+        class BrokenJournal(ActionJournal):
+            def append(self, record):
+                raise RuntimeError("secret /Users/test/private path")
+
+        results = apply_recommendations(
+            [self.item.id],
+            self.index,
+            now=NOW,
+            journal=BrokenJournal(self.home / "broken.jsonl"),
+        )
+
+        self.assertEqual(results[0].outcome, ApplyOutcome.REMOVED)
+        self.assertEqual(results[0].journal_warning, "journal write failed")
+        self.assertNotIn("private", results[0].journal_warning)
+        self.assertEqual(
+            results[0].to_dict()["journal_warning"], "journal write failed"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

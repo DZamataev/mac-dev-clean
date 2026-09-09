@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mac_dev_clean.executor import ApplyOutcome, ApplyResult
 from mac_dev_clean.fsevents import VolumeIdentity
@@ -1970,6 +1971,24 @@ class BatchCExecutionBoundaryTests(InvokeToolTests):
         self.assertLessEqual(len(result.reported), 4000)
         self.assertEqual(result.to_dict()["reported"], result.reported)
 
+    def test_long_success_output_preserves_the_owners_final_summary(self):
+        summary = "Total reclaimed space: 7.499GB"
+        stdout = "Starting cleanup\n{}\n{}\n".format("x" * 10000, summary)
+        runner = RecordingRunner(
+            {
+                DOCKER_PREVIEW_ARGV: ok(DOCKER_PREVIEW_ARGV, PREVIEW),
+                DOCKER_PRUNE_ARGV: ok(DOCKER_PRUNE_ARGV, stdout),
+            }
+        )
+
+        result = invoke_tool_recommendations(
+            [self.item.id], self.index, self.journal, runners={"docker": runner}
+        )[0]
+
+        self.assertLessEqual(len(result.reported), 4000)
+        self.assertIn(summary, result.reported)
+        self.assertEqual(self.records()[-1]["detail"], summary)
+
     def test_legacy_apply_result_construction_keeps_reported_optional(self):
         result = ApplyResult(
             recommendation_id="old",
@@ -2004,6 +2023,57 @@ class BatchCExecutionBoundaryTests(InvokeToolTests):
 
         self.assertEqual(result.outcome, ApplyOutcome.INVOKED)
         self.assertEqual(runner.calls.count(DOCKER_PRUNE_ARGV), 1)
+        self.assertEqual(result.journal_warning, "journal write failed")
+        self.assertNotIn("journal unavailable", result.journal_warning)
+        self.assertEqual(result.to_dict()["journal_warning"], "journal write failed")
+
+
+class AndroidSdkBindingTests(unittest.TestCase):
+    def test_default_sdkmanager_runner_is_bound_to_the_reviewed_sdk_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            reviewed_sdk = root / "sdk-a"
+            current_sdk = root / "sdk-b"
+            location = reviewed_sdk / "platforms" / "android-33"
+            location.mkdir(parents=True)
+            (location / "android.jar").write_bytes(b"payload")
+            (reviewed_sdk / "cmdline-tools" / "latest" / "bin").mkdir(parents=True)
+            (current_sdk / "cmdline-tools" / "latest" / "bin").mkdir(parents=True)
+            item = build_sdk_item(reviewed_sdk, location)
+            index = open_index(root / "index.sqlite3")
+            self.addCleanup(index.close)
+            index.begin_generation(VolumeIdentity(device=1, uuid="U"), event_id=1)
+            index.record_recommendation(item)
+            index.complete_generation()
+            journal = ActionJournal(root / "actions.jsonl")
+            preview = sdk_stdout(
+                [("platforms;android-33", "2", "Android SDK Platform 33", "platforms/android-33")]
+            )
+            action = item.tool_action
+            assert action is not None
+            runner = RecordingRunner(
+                {
+                    SDK_LIST_ARGV: ok(SDK_LIST_ARGV, preview),
+                    action.argv: ok(action.argv, "uninstalled"),
+                }
+            )
+            bound_roots = []
+            fallback_modes = []
+
+            def bind(name, extra_dirs=(), allow_fallback=True):
+                bound_roots.append(tuple(extra_dirs))
+                fallback_modes.append(allow_fallback)
+                return runner
+
+            with patch("mac_dev_clean.tool_executor.find_sdk_root", return_value=current_sdk), patch(
+                "mac_dev_clean.tool_executor.binary_runner", side_effect=bind
+            ):
+                result = invoke_tool_recommendations([item.id], index, journal)[0]
+
+            self.assertEqual(result.outcome, ApplyOutcome.INVOKED, result.error)
+            self.assertTrue(all(str(path).startswith(str(reviewed_sdk)) for path in bound_roots[0]))
+            self.assertFalse(any(str(path).startswith(str(current_sdk)) for path in bound_roots[0]))
+            self.assertEqual(fallback_modes, [False])
 
 
 if __name__ == "__main__":

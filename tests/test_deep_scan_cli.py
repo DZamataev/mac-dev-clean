@@ -6,8 +6,10 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from mac_dev_clean.cli import main
+from mac_dev_clean.journal import ActionJournal
 
 NOW = datetime.now(timezone.utc)
 OLD = NOW - timedelta(days=400)
@@ -37,8 +39,14 @@ class DeepScanCliTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.index_path = self.home / "index.sqlite3"
         self.artifact = build_project(self.home)
+        self.old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
 
     def tearDown(self):
+        if self.old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self.old_home
         self.temp.cleanup()
 
     def run_cli(self, argv):
@@ -87,6 +95,14 @@ class DeepScanCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(apply_output)["results"][0]["outcome"], "skipped")
         self.assertTrue(self.artifact.exists())
+        journal_path = self.home / "Library" / "Logs" / "mac-dev-clean" / "actions.jsonl"
+        records = [
+            json.loads(line)
+            for line in journal_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(records[-1]["recommendation_id"], item_id)
+        self.assertEqual(records[-1]["action"], "delete_tree")
+        self.assertTrue(records[-1]["dry_run"])
 
     def test_apply_removes_the_artifact(self):
         _, output = self.run_cli(
@@ -105,6 +121,27 @@ class DeepScanCliTests(unittest.TestCase):
     def test_apply_requires_at_least_one_id(self):
         with self.assertRaises(SystemExit):
             self.run_cli(["apply", "--index", str(self.index_path)])
+
+    def test_apply_text_surfaces_a_safe_nonfatal_journal_warning(self):
+        class BrokenJournal(ActionJournal):
+            def append(self, record):
+                raise RuntimeError("secret /Users/test/private path")
+
+        _, output = self.run_cli(
+            ["deep-scan", "--root", str(self.home), "--index", str(self.index_path), "--no-fsevents", "--json"]
+        )
+        item_id = json.loads(output)["recommendations"][0]["id"]
+        with patch(
+            "mac_dev_clean.cli.open_journal",
+            return_value=BrokenJournal(self.home / "broken.jsonl"),
+        ):
+            code, apply_output = self.run_cli(
+                ["apply", "--id", item_id, "--index", str(self.index_path), "--dry-run"]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("journal write failed", apply_output)
+        self.assertNotIn("private", apply_output)
 
     def test_apply_reports_failures_with_exit_code_one(self):
         code, apply_output = self.run_cli(

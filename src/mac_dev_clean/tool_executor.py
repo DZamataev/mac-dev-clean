@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .executor import ApplyOutcome, ApplyResult
 from .index import ScanIndex
-from .journal import ActionJournal, JournalRecord
+from .journal import ActionJournal, JournalRecord, append_with_warning
 from .recommendation import ActionKind, Recommendation, ToolAction, normalized_path
 from .scanner import path_size
 from .sim_prune import (
@@ -44,11 +44,6 @@ from .tools.simulator import (
 from .tools.sizes import parse_tool_size
 
 _TRUNCATION_MARKER = "...[truncated]"
-
-# The scan reaches these through a versioned directory inside the SDK rather
-# than through PATH, so apply time has to rebuild the same search or a
-# recommendation the scan could act on becomes one it cannot.
-_ANDROID_TOOLS = ("sdkmanager", "avdmanager")
 
 #: The generation of the contract set below. Bump it when a vector changes, so
 #: a review can tell an intentional widening from an accident.
@@ -161,6 +156,19 @@ def contract_refusal(action: ToolAction) -> Optional[str]:
     return None
 
 
+class _ObservedJournal:
+    """Collect one safe persistence warning for each attempted audit row."""
+
+    def __init__(self, journal: ActionJournal) -> None:
+        self._journal = journal
+        self.warnings = []  # type: List[str]
+
+    def append(self, record: JournalRecord) -> bool:
+        warning = append_with_warning(self._journal, record)
+        self.warnings.append(warning)
+        return not warning
+
+
 class _PreviewRefused(Exception):
     """The preview ran but cannot be allowed to authorise anything."""
 
@@ -169,15 +177,26 @@ class _PreviewRefused(Exception):
         self.reason = reason
 
 
-def _default_runner(action: ToolAction) -> ToolRunner:
-    """Resolve the executable the scan itself used for this vector.
+def _default_runner(item: Recommendation) -> ToolRunner:
+    """Resolve the executable that owns this reviewed recommendation.
 
     Bound to argv[0] rather than to the tool name: the simulator's vectors run
     through xcrun, so the two diverge exactly where the declared vector is the
-    thing that matters.
+    thing that matters. sdkmanager is additionally bound to the stored SDK root;
+    resolving it from today's environment could uninstall the same package from
+    a different SDK than the one whose path and size the user reviewed.
     """
+    action = item.tool_action
+    if action is None:
+        raise ValueError("tool recommendation has no action")
     executable = action.argv[0]
-    if os.path.basename(executable) in _ANDROID_TOOLS:
+    if os.path.basename(executable) == "sdkmanager":
+        return binary_runner(
+            executable,
+            extra_dirs=cmdline_tool_dirs(item.safety_root),
+            allow_fallback=False,
+        )
+    if os.path.basename(executable) == "avdmanager":
         sdk_root = find_sdk_root(dict(os.environ), Path.home())
         extra_dirs = cmdline_tool_dirs(sdk_root) if sdk_root is not None else ()
         return binary_runner(executable, extra_dirs=extra_dirs)
@@ -189,6 +208,17 @@ def _bounded_reason(reason: str) -> str:
         return reason
     retained = MAX_STDERR_CHARS - len(_TRUNCATION_MARKER)
     return reason[:retained] + _TRUNCATION_MARKER
+
+
+def _bounded_output(output: str) -> str:
+    """Keep both command context and the owner's final summary line."""
+    if len(output) <= MAX_STDERR_CHARS:
+        return output
+    separator = "\n{}\n".format(_TRUNCATION_MARKER)
+    retained = MAX_STDERR_CHARS - len(separator)
+    head = retained // 2
+    tail = retained - head
+    return output[:head] + separator + output[-tail:]
 
 
 def _journal_target(item: Optional[Recommendation]) -> str:
@@ -205,7 +235,7 @@ def _journal_target(item: Optional[Recommendation]) -> str:
 
 
 def _journal(
-    journal: ActionJournal,
+    journal: _ObservedJournal,
     item: Optional[Recommendation],
     recommendation_id: str,
     outcome: ApplyOutcome,
@@ -635,6 +665,7 @@ def invoke_tool_recommendations(
     crash between the action and the report cannot hide what happened.
     """
     supplied = runners or {}
+    observed_journal = _ObservedJournal(journal)
     moment = now or datetime.now(timezone.utc)
     results = []  # type: List[ApplyResult]
 
@@ -647,7 +678,7 @@ def invoke_tool_recommendations(
         item = index.load_recommendation(recommendation_id)
         if item is None:
             _journal(
-                journal,
+                observed_journal,
                 None,
                 recommendation_id,
                 ApplyOutcome.FAILED,
@@ -672,7 +703,7 @@ def invoke_tool_recommendations(
         action = item.tool_action
         if item.action is not ActionKind.INVOKE_TOOL or action is None:
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.FAILED,
@@ -700,7 +731,7 @@ def invoke_tool_recommendations(
         refusal = contract_refusal(action)
         if refusal is not None:
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.FAILED,
@@ -725,13 +756,13 @@ def invoke_tool_recommendations(
 
         runner = supplied.get(action.tool)
         if runner is None:
-            runner = _default_runner(action)
+            runner = _default_runner(item)
 
         try:
             effect = current_tool_effect(item, runner)
         except ToolUnavailable as exc:
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.FAILED,
@@ -755,7 +786,7 @@ def invoke_tool_recommendations(
             continue
         except _PreviewRefused as exc:
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.FAILED,
@@ -785,7 +816,7 @@ def invoke_tool_recommendations(
             # measures nothing" are different facts about the machine.
             detail = effect.detail or "the tool now reports nothing to reclaim"
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.SKIPPED,
@@ -811,7 +842,7 @@ def invoke_tool_recommendations(
         if should_cancel is not None and should_cancel():
             detail = "cancelled after preview: the action was not attempted"
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.SKIPPED,
@@ -840,7 +871,7 @@ def invoke_tool_recommendations(
                 " ".join(action.argv), effect.detail
             )
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.SKIPPED,
@@ -871,7 +902,7 @@ def invoke_tool_recommendations(
             # trail has to say which command was attempted, not merely that
             # something failed.
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.FAILED,
@@ -909,7 +940,7 @@ def invoke_tool_recommendations(
 
         if detail:
             _journal(
-                journal,
+                observed_journal,
                 item,
                 item.id,
                 ApplyOutcome.FAILED,
@@ -937,9 +968,9 @@ def invoke_tool_recommendations(
         # figure rather than the estimate that led us to run the tool.
         # Falling back to the preview's own account keeps the journal saying
         # what was acted on even for a tool that prints nothing on success.
-        reported = _bounded_reason(executed.stdout.strip())
+        reported = _bounded_output(executed.stdout.strip())
         _journal(
-            journal,
+            observed_journal,
             item,
             item.id,
             ApplyOutcome.INVOKED,
@@ -961,4 +992,9 @@ def invoke_tool_recommendations(
             )
         )
 
-    return results
+    return [
+        replace(result, journal_warning=observed_journal.warnings[index])
+        if index < len(observed_journal.warnings) and observed_journal.warnings[index]
+        else result
+        for index, result in enumerate(results)
+    ]

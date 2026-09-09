@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Sequence
 
 from .cleaner import _remove_path
 from .index import ScanIndex
-from .journal import ActionJournal, JournalRecord
+from .journal import ActionJournal, JournalRecord, append_with_warning
 from .model import human_bytes
 from .projects import (
     INACTIVITY_DAYS,
@@ -40,6 +40,7 @@ class ApplyResult:
     dry_run: bool
     error: str = ""
     reported: str = ""
+    journal_warning: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -52,6 +53,7 @@ class ApplyResult:
             "dry_run": self.dry_run,
             "error": self.error,
             "reported": self.reported,
+            "journal_warning": self.journal_warning,
         }
 
 
@@ -165,9 +167,11 @@ def apply_recommendations(
     moment = now or datetime.now(timezone.utc)
     results: List[ApplyResult] = []
 
-    def journal_path_result(item: Optional[Recommendation], result: ApplyResult) -> None:
+    def journal_path_result(
+        item: Optional[Recommendation], result: ApplyResult
+    ) -> ApplyResult:
         if journal is None:
-            return
+            return result
         record = JournalRecord(
             recommendation_id=result.recommendation_id,
             detector_id=item.detector_id if item is not None else "",
@@ -180,10 +184,8 @@ def apply_recommendations(
             detail=result.error,
             recorded_at=moment,
         )
-        try:
-            journal.append(record)
-        except Exception:
-            pass
+        warning = append_with_warning(journal, record)
+        return replace(result, journal_warning=warning) if warning else result
 
     for recommendation_id in recommendation_ids:
         item = index.load_recommendation(recommendation_id)
@@ -221,8 +223,7 @@ def apply_recommendations(
                 dry_run=dry_run,
                 error="recommendation not found in the current scan",
             )
-            journal_path_result(None, result)
-            results.append(result)
+            results.append(journal_path_result(None, result))
             continue
 
         checked = _revalidate(item, now=moment)
@@ -236,8 +237,7 @@ def apply_recommendations(
                 dry_run=dry_run,
                 error=checked.error,
             )
-            journal_path_result(item, result)
-            results.append(result)
+            results.append(journal_path_result(item, result))
             continue
 
         if dry_run:
@@ -250,8 +250,7 @@ def apply_recommendations(
                 dry_run=True,
                 error="dry run: nothing was removed",
             )
-            journal_path_result(item, result)
-            results.append(result)
+            results.append(journal_path_result(item, result))
             continue
 
         try:
@@ -266,11 +265,9 @@ def apply_recommendations(
                 dry_run=False,
                 error=str(exc),
             )
-            journal_path_result(item, result)
-            results.append(result)
+            results.append(journal_path_result(item, result))
             continue
 
-        journal_path_result(item, checked)
-        results.append(checked)
+        results.append(journal_path_result(item, checked))
 
     return results

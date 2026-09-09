@@ -133,6 +133,18 @@ class ActionJournal:
         return None
 
 
+def append_with_warning(journal: ActionJournal, record: JournalRecord) -> str:
+    """Append without blocking the action and return a caller-safe warning."""
+    try:
+        appended = journal.append(record)
+        warning = getattr(journal, "last_warning", None)
+    except Exception:
+        return "journal write failed"
+    if not appended or warning:
+        return "journal write failed"
+    return ""
+
+
 def open_journal(path: Optional[Path] = None) -> ActionJournal:
     target = Path(path) if path is not None else DEFAULT_JOURNAL_PATH
     return ActionJournal(target.expanduser())

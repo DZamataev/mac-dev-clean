@@ -66,8 +66,17 @@ def _exception_reason(exc: Exception) -> str:
     return _bounded_reason(str(exc) or exc.__class__.__name__)
 
 
-def binary_runner(name: str, extra_dirs: Tuple[Path, ...] = ()) -> ToolRunner:
-    """Return a runner permanently bound to one declared executable."""
+def binary_runner(
+    name: str,
+    extra_dirs: Tuple[Path, ...] = (),
+    allow_fallback: bool = True,
+) -> ToolRunner:
+    """Return a runner permanently bound to one declared executable.
+
+    ``allow_fallback=False`` confines resolution to ``extra_dirs``. Apply uses
+    that mode for sdkmanager so a stale recommendation cannot fall through to
+    another SDK on PATH after the reviewed SDK's binary disappears.
+    """
     if not isinstance(name, str):
         raise TypeError("binary name must be a string")
     if not name:
@@ -75,7 +84,19 @@ def binary_runner(name: str, extra_dirs: Tuple[Path, ...] = ()) -> ToolRunner:
     if "\x00" in name:
         raise ValueError("binary name must not contain NUL")
 
-    search_dirs = tuple(extra_dirs) + _STANDARD_BINARY_DIRS
+    search_dirs = tuple(extra_dirs) + (_STANDARD_BINARY_DIRS if allow_fallback else ())
+
+    def resolve() -> Optional[str]:
+        if allow_fallback:
+            return find_binary(name, extra_dirs=search_dirs)
+        for directory in search_dirs:
+            candidate = Path(directory) / name
+            try:
+                if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                    return str(candidate)
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return None
 
     def run(argv: Sequence[str]):
         if isinstance(argv, (str, bytes)) or not isinstance(argv, SequenceABC):
@@ -90,7 +111,7 @@ def binary_runner(name: str, extra_dirs: Tuple[Path, ...] = ()) -> ToolRunner:
         if vector[0] != name:
             raise ValueError("tool runner executable does not match declared name")
 
-        resolved = find_binary(name, extra_dirs=search_dirs)
+        resolved = resolve()
         if resolved is None:
             raise ToolUnavailable(name, "not installed")
         return run_tool((resolved,) + vector[1:])
