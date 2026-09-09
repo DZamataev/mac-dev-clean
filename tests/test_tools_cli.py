@@ -533,6 +533,83 @@ class JournalCommandTests(unittest.TestCase):
         self.assertNotIn("secret", output)
         self.assertNotIn("private", output)
 
+    def test_unreadable_journal_human_output_is_fixed_and_nonzero(self):
+        self.path.write_text("present\n", encoding="utf-8")
+        with patch(
+            "mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)
+        ), patch(
+            "builtins.open",
+            side_effect=PermissionError("secret /Users/private/actions.jsonl"),
+        ):
+            code, output, error = self.run_cli(
+                ["journal", "--journal", str(self.path)]
+            )
+
+        self.assertEqual((code, error), (1, ""))
+        self.assertEqual(output, "Could not read the action journal.\n")
+        self.assertNotIn("secret", output)
+        self.assertNotIn("private", output)
+
+    def test_iteration_error_discards_partial_records_and_is_safe(self):
+        class FailingReader:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def __iter__(self):
+                yield b'{"target":"partial"}\n'
+                raise OSError("secret /Users/private/actions.jsonl")
+
+        with patch(
+            "mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)
+        ), patch("builtins.open", return_value=FailingReader()):
+            code, output, error = self.run_cli(
+                ["journal", "--json", "--journal", str(self.path)]
+            )
+
+        self.assertEqual((code, error), (1, ""))
+        self.assertEqual(
+            json.loads(output),
+            {"error": "Could not read the action journal.", "records": []},
+        )
+        self.assertNotIn("partial", output)
+        self.assertNotIn("secret", output)
+        self.assertNotIn("private", output)
+
+    def test_missing_journal_human_output_is_empty_success(self):
+        with patch(
+            "mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)
+        ):
+            code, output, error = self.run_cli(
+                ["journal", "--journal", str(self.path)]
+            )
+
+        self.assertEqual((code, output, error), (0, "", ""))
+
+    def test_tail_is_applied_after_mixed_invalid_records_are_filtered(self):
+        first = {"target": "first"}
+        second = {"target": "second"}
+        third = {"target": "third"}
+        self.path.write_bytes(
+            json.dumps(first).encode("utf-8")
+            + b"\n\xff\nnot-json\n[]\n"
+            + json.dumps(second).encode("utf-8")
+            + b"\n"
+            + json.dumps(third).encode("utf-8")
+            + b"\n"
+        )
+        with patch(
+            "mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)
+        ):
+            code, output, error = self.run_cli(
+                ["journal", "--json", "--tail", "2", "--journal", str(self.path)]
+            )
+
+        self.assertEqual((code, error), (0, ""))
+        self.assertEqual(json.loads(output), {"records": [second, third]})
+
     def test_journal_tail_rejects_zero_and_negative_before_opening(self):
         for value in ("0", "-1"):
             with self.subTest(value=value), patch(
