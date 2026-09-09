@@ -673,9 +673,12 @@ def run_journal(args: argparse.Namespace) -> int:
 
     records = []
     try:
-        with open(str(path), "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
+        with open(str(path), "rb") as handle:
+            for raw_line in handle:
+                try:
+                    line = raw_line.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue
                 if not line:
                     continue
                 try:
@@ -684,8 +687,19 @@ def run_journal(args: argparse.Namespace) -> int:
                     continue
                 if isinstance(record, dict):
                     records.append(record)
-    except OSError:
+    except FileNotFoundError:
         records = []
+    except OSError:
+        message = "Could not read the action journal."
+        if args.json:
+            print(
+                json.dumps(
+                    {"error": message, "records": []}, indent=2, sort_keys=True
+                )
+            )
+        else:
+            print(message)
+        return 1
 
     if args.tail is not None:
         records = records[-args.tail :]
