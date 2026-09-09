@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 from .cleaner import _remove_path
 from .index import ScanIndex
+from .journal import ActionJournal, JournalRecord
 from .model import human_bytes
 from .projects import (
     INACTIVITY_DAYS,
@@ -16,12 +17,14 @@ from .projects import (
     last_meaningful_activity,
 )
 from .recommendation import ActionKind, Recommendation, normalized_path
+from .tools.runner import ToolRunner
 
 RECIPES_BY_ID = {recipe.detector_id: recipe for recipe in RECIPES}
 
 
 class ApplyOutcome(Enum):
     REMOVED = "removed"
+    INVOKED = "invoked"
     SKIPPED = "skipped"
     CHANGED_SINCE_SCAN = "changed_since_scan"
     FAILED = "failed"
@@ -36,6 +39,7 @@ class ApplyResult:
     outcome: ApplyOutcome
     dry_run: bool
     error: str = ""
+    reported: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -47,6 +51,7 @@ class ApplyResult:
             "outcome": self.outcome.value,
             "dry_run": self.dry_run,
             "error": self.error,
+            "reported": self.reported,
         }
 
 
@@ -149,6 +154,8 @@ def apply_recommendations(
     dry_run: bool = False,
     now: Optional[datetime] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    journal: Optional[ActionJournal] = None,
+    runners: Optional[Dict[str, ToolRunner]] = None,
 ) -> List[ApplyResult]:
     """Apply recommendations by ID only.
 
@@ -158,70 +165,112 @@ def apply_recommendations(
     moment = now or datetime.now(timezone.utc)
     results: List[ApplyResult] = []
 
+    def journal_path_result(item: Optional[Recommendation], result: ApplyResult) -> None:
+        if journal is None:
+            return
+        record = JournalRecord(
+            recommendation_id=result.recommendation_id,
+            detector_id=item.detector_id if item is not None else "",
+            category=item.category if item is not None else "",
+            target=normalized_path(item.path) if item is not None else "",
+            action=item.action.value if item is not None else "",
+            outcome=result.outcome.value,
+            reclaimable_bytes=result.reclaimable_bytes,
+            dry_run=result.dry_run,
+            detail=result.error,
+            recorded_at=moment,
+        )
+        try:
+            journal.append(record)
+        except Exception:
+            pass
+
     for recommendation_id in recommendation_ids:
+        item = index.load_recommendation(recommendation_id)
+
+        if item is not None and item.action is ActionKind.INVOKE_TOOL:
+            if journal is None:
+                from .journal import open_journal
+
+                journal = open_journal()
+            from .tool_executor import invoke_tool_recommendations
+
+            results.extend(
+                invoke_tool_recommendations(
+                    [recommendation_id],
+                    index,
+                    journal,
+                    runners=runners,
+                    dry_run=dry_run,
+                    now=moment,
+                    should_cancel=should_cancel,
+                )
+            )
+            continue
+
         if should_cancel is not None and should_cancel():
             break
 
-        item = index.load_recommendation(recommendation_id)
         if item is None:
-            results.append(
-                ApplyResult(
-                    recommendation_id=recommendation_id,
-                    label="",
-                    path="",
-                    reclaimable_bytes=0,
-                    outcome=ApplyOutcome.FAILED,
-                    dry_run=dry_run,
-                    error="recommendation not found in the current scan",
-                )
+            result = ApplyResult(
+                recommendation_id=recommendation_id,
+                label="",
+                path="",
+                reclaimable_bytes=0,
+                outcome=ApplyOutcome.FAILED,
+                dry_run=dry_run,
+                error="recommendation not found in the current scan",
             )
+            journal_path_result(None, result)
+            results.append(result)
             continue
 
         checked = _revalidate(item, now=moment)
         if checked.outcome is not ApplyOutcome.REMOVED:
-            results.append(
-                ApplyResult(
-                    recommendation_id=checked.recommendation_id,
-                    label=checked.label,
-                    path=checked.path,
-                    reclaimable_bytes=checked.reclaimable_bytes,
-                    outcome=checked.outcome,
-                    dry_run=dry_run,
-                    error=checked.error,
-                )
+            result = ApplyResult(
+                recommendation_id=checked.recommendation_id,
+                label=checked.label,
+                path=checked.path,
+                reclaimable_bytes=checked.reclaimable_bytes,
+                outcome=checked.outcome,
+                dry_run=dry_run,
+                error=checked.error,
             )
+            journal_path_result(item, result)
+            results.append(result)
             continue
 
         if dry_run:
-            results.append(
-                ApplyResult(
-                    recommendation_id=item.id,
-                    label=item.label,
-                    path=normalized_path(item.path),
-                    reclaimable_bytes=item.reclaimable_bytes,
-                    outcome=ApplyOutcome.SKIPPED,
-                    dry_run=True,
-                    error="dry run: nothing was removed",
-                )
+            result = ApplyResult(
+                recommendation_id=item.id,
+                label=item.label,
+                path=normalized_path(item.path),
+                reclaimable_bytes=item.reclaimable_bytes,
+                outcome=ApplyOutcome.SKIPPED,
+                dry_run=True,
+                error="dry run: nothing was removed",
             )
+            journal_path_result(item, result)
+            results.append(result)
             continue
 
         try:
             _remove_path(item.path)
         except OSError as exc:
-            results.append(
-                ApplyResult(
-                    recommendation_id=item.id,
-                    label=item.label,
-                    path=normalized_path(item.path),
-                    reclaimable_bytes=item.reclaimable_bytes,
-                    outcome=ApplyOutcome.FAILED,
-                    dry_run=False,
-                    error=str(exc),
-                )
+            result = ApplyResult(
+                recommendation_id=item.id,
+                label=item.label,
+                path=normalized_path(item.path),
+                reclaimable_bytes=item.reclaimable_bytes,
+                outcome=ApplyOutcome.FAILED,
+                dry_run=False,
+                error=str(exc),
             )
+            journal_path_result(item, result)
+            results.append(result)
             continue
 
+        journal_path_result(item, checked)
         results.append(checked)
 
     return results

@@ -1,5 +1,6 @@
 import os
 import shutil
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,6 +8,16 @@ from tempfile import TemporaryDirectory
 
 from mac_dev_clean.deep_scan import deep_scan
 from mac_dev_clean.executor import ApplyOutcome, apply_recommendations
+from mac_dev_clean.journal import ActionJournal
+from mac_dev_clean.recommendation import (
+    ActionKind,
+    Confidence,
+    Evidence,
+    Recommendation,
+    RestorationCost,
+    ToolAction,
+)
+from mac_dev_clean.tools.runner import ToolResult
 from mac_dev_clean.index import open_index
 
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
@@ -205,6 +216,83 @@ class ExecutorTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertTrue(self.artifact.exists())
+
+    def test_mixed_path_and_tool_actions_keep_input_order_and_one_journal_record_each(self):
+        tool_item = Recommendation(
+            detector_id="docker-build-cache",
+            category="tool-managed",
+            label="Docker build cache",
+            path=self.home,
+            action=ActionKind.INVOKE_TOOL,
+            allocated_bytes=18920000000,
+            reclaimable_bytes=7499000000,
+            confidence=Confidence.EXACT,
+            restoration=RestorationCost.EXTERNAL_STATE,
+            selected_by_default=False,
+            evidence=(Evidence("tool-report", "docker reports 7.499GB"),),
+            safety_root=self.home,
+            reason="",
+            generation=self.item.generation,
+            tool_action=ToolAction(
+                tool="docker",
+                resource="build-cache",
+                argv=("docker", "builder", "prune", "-f"),
+                preview_argv=(
+                    "docker",
+                    "system",
+                    "df",
+                    "--format",
+                    "{{json .}}",
+                ),
+                reported="7.499GB",
+            ),
+        )
+        self.index.record_recommendation(tool_item)
+        self.index.commit_batch()
+        preview = tool_item.tool_action.preview_argv
+        action = tool_item.tool_action.argv
+        calls = []
+
+        def runner(argv):
+            vector = tuple(argv)
+            calls.append(vector)
+            if vector == tuple(preview):
+                stdout = (
+                    '{"Active":"0","Reclaimable":"7.499GB",'
+                    '"Size":"18.92GB","TotalCount":"144",'
+                    '"Type":"Build Cache"}\n'
+                )
+            elif vector == tuple(action):
+                stdout = "Total reclaimed space: 7.499GB"
+            else:
+                raise AssertionError("unexpected fake vector")
+            return ToolResult(vector, stdout, "", 0)
+
+        journal_path = self.home / "actions.jsonl"
+        results = apply_recommendations(
+            [tool_item.id, self.item.id],
+            self.index,
+            now=NOW,
+            journal=ActionJournal(journal_path),
+            runners={"docker": runner},
+        )
+
+        self.assertEqual(
+            [result.outcome for result in results],
+            [ApplyOutcome.INVOKED, ApplyOutcome.REMOVED],
+        )
+        self.assertEqual(calls, [tuple(preview), tuple(action)])
+        records = [
+            json.loads(line)
+            for line in journal_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            [record["recommendation_id"] for record in records],
+            [tool_item.id, self.item.id],
+        )
+        self.assertEqual(records[0]["target"], "docker:build-cache")
+        self.assertEqual(records[1]["target"], str(self.artifact))
 
 
 if __name__ == "__main__":
