@@ -400,6 +400,47 @@ reports whether FSEvents history was complete enough to have skipped unchanged
 directories, which is the groundwork for incremental rescans in a later
 release; today that flag changes nothing about how much is scanned.
 
+### Tool-managed storage
+
+Docker, Homebrew, Android SDK/AVD, and Simulator storage must be managed through
+their official command-line tools rather than by deleting their private files.
+Inventory, preview one exact recommendation, and inspect the local action
+journal with:
+
+```sh
+mac-dev-clean tools
+mac-dev-clean tools-apply --id <id> --dry-run
+mac-dev-clean journal --tail 20
+```
+
+`tools` is read-only and does not start Docker Desktop, Android Studio, or
+Simulator. Each finding shows the exact command a real apply would invoke and
+is stored under an opaque ID in
+`~/Library/Caches/mac-dev-clean/tools.sqlite3`. `tools-apply` accepts only an ID
+from the current inventory, re-runs the read-only preview, revalidates its
+reported state, and invokes only the frozen command vector for that one item.
+Nothing is selected automatically.
+
+Docker inventory covers default-prune build cache, dangling images, stopped
+containers, and unused anonymous volumes. It deliberately does not offer
+`docker image prune -a`: that command also removes deliberately pulled tagged
+images not attached to a running container, which is broader than the previewed
+reclaimable class. Docker's class-wide figures can also be upper bounds, and
+space inside Docker Desktop's disk image may not return to the macOS volume
+until Docker compacts it.
+
+Homebrew's number comes from `brew cleanup -n`, not from measuring only
+`~/Library/Caches/Homebrew`. It can include old installed formula versions,
+stale downloads, and Homebrew-managed runtime files elsewhere under the
+Homebrew prefix, so the figure can differ from the cache directory's size.
+
+Android SDK packages and Android Virtual Devices (AVDs) are inventory-only
+during `tools`: no component, emulator, app, or device data is changed. A real
+`tools-apply` for one current ID delegates removal to `sdkmanager --uninstall`
+or `avdmanager delete avd`; these recommendations are never selected by
+default because projects may depend on old toolchains and AVD deletion loses
+its installed apps and data.
+
 ## What It Scans
 
 Cleanable locations:
@@ -486,6 +527,24 @@ directories outside iCloud Drive.
 - Symlink targets are refused.
 - Scan targets under 1 MiB are skipped to avoid surfacing empty directories or insignificant cleanup/review suggestions.
 - Use `--dry-run` before deleting to see the selected paths.
+
+### Action journal
+
+Every preview, refusal, error, skipped dry run, and successful cleanup attempt is
+appended locally to `~/Library/Logs/mac-dev-clean/actions.jsonl`. Records include
+the timestamp, opaque recommendation ID when applicable, category and target,
+exact argv that was executed, dry-run flag, outcome, reported reclaimable
+bytes, and bounded detail suitable for auditing. The journal may contain local
+paths and command arguments; review it before sharing.
+
+The journal is never uploaded and is not included in shared diagnostics. It is
+bounded by rotation and retains one rotated segment. Inspect it with
+`mac-dev-clean journal`, or explicitly remove both the active and rotated local
+files with:
+
+```sh
+mac-dev-clean journal --clear
+```
 
 Supported age values are `s`, `m`, `h`, `d`, and `w`, for example `30d`, `12h`, or `2w`.
 

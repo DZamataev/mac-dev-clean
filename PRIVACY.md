@@ -13,6 +13,19 @@
 - JSON output is written only where the user explicitly redirects or saves it.
   It can contain local paths and should be reviewed before sharing publicly.
 
+## Local action journal
+
+Preview, refusal, failure, skipped dry-run, and successful cleanup outcomes are
+recorded in the append-only local journal at
+`~/Library/Logs/mac-dev-clean/actions.jsonl`. Records can contain local paths,
+opaque recommendation IDs, exact command arguments, sizes, timestamps, and
+bounded outcome details. The journal is never uploaded and is excluded from
+shared diagnostics.
+
+The file is size-bounded and retains one local rotated segment. You can inspect
+it with `mac-dev-clean journal` and explicitly remove both segments with
+`mac-dev-clean journal --clear`.
+
 ## Network and iCloud behavior
 
 The cleanup engine does not require a network connection. The native app's

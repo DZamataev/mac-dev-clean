@@ -16,6 +16,20 @@ All notable changes to this project will be documented in this file.
   FSEvents-based incremental rescanning and a safe full-walk fallback whenever
   the event history is incomplete.
 
+### Tool-managed storage and action journal
+
+- Added read-only `tools` inventory for Docker, Homebrew, Android SDK/AVD, and
+  Simulator storage, with explicit unavailable states and exact command previews.
+- Added `tools-apply` for one current opaque recommendation ID at a time, with
+  fresh preview revalidation, frozen argv, no shell execution, no default
+  selection, and official Docker, Homebrew, Android, and `simctl` commands.
+- Added a native Tool-managed Storage page with status, command preview,
+  selection, confirmation, progress, refusal, and refresh states.
+- Added an append-only, rotating local action journal for previews, refusals,
+  failures, skipped dry runs, and successful actions, plus `journal` inspection
+  and explicit `journal --clear`.
+- Extended the same journal to legacy clean and confirmed interactive cleanup.
+
 ## 0.5.2 - 2026-07-11
 
 - Added `update_app.sh` to rebuild, safely replace, and relaunch the locally
