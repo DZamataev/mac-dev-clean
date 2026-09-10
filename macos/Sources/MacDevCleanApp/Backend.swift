@@ -7,6 +7,7 @@ enum BackendError: LocalizedError {
     case commandFailed(operation: String, code: Int32, details: String)
     case commandTimedOut
     case outputLimitExceeded
+    case processSetupFailed
     case invalidOutput(String)
 
     var errorDescription: String? {
@@ -24,6 +25,8 @@ enum BackendError: LocalizedError {
             return "The cleanup engine timed out. Its previous recommendations are no longer actionable."
         case .outputLimitExceeded:
             return "The cleanup engine exceeded the safe output limit. Its output was discarded."
+        case .processSetupFailed:
+            return "The cleanup engine could not start in a confined process scope."
         case let .invalidOutput(message):
             return "mac-dev-clean returned invalid data.\n\(message)"
         }
@@ -220,38 +223,198 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         }
     }
 
-    private static func directChildPIDs(of parentPID: pid_t) -> [pid_t] {
+    private static func createProcessSentinel() throws -> (url: URL, descriptor: Int32) {
+        // The inherited descriptor remains a stable ownership marker after fork,
+        // reparenting, or process-group changes. A per-run random path prevents
+        // accidental selection of an unrelated same-user process.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac-dev-clean-process-\(UUID().uuidString).sentinel")
+        let descriptor = url.path.withCString {
+            open($0, O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        }
+        guard descriptor >= 0 else { throw BackendError.processSetupFailed }
+        return (url, descriptor)
+    }
+
+    private static func sentinelHolderPIDs(at url: URL) -> [pid_t] {
         var capacity = 32
         while capacity <= 65_536 {
-            var children = [pid_t](repeating: 0, count: capacity)
-            let count = proc_listchildpids(
-                parentPID,
-                &children,
-                Int32(children.count * MemoryLayout<pid_t>.stride)
+            var processIDs = [pid_t](repeating: 0, count: capacity)
+            let returnedBytes = url.path.withCString {
+                proc_listpidspath(
+                    UInt32(PROC_ALL_PIDS),
+                    0,
+                    $0,
+                    0,
+                    &processIDs,
+                    Int32(processIDs.count * MemoryLayout<pid_t>.stride)
+                )
+            }
+            guard returnedBytes >= 0 else { return [] }
+            let initializedCount = min(
+                Int(returnedBytes) / MemoryLayout<pid_t>.stride,
+                capacity
             )
-            guard count >= 0 else { return [] }
-            if count < capacity || capacity == 65_536 {
-                let initializedCount = min(Int(count), capacity)
-                return Array(children.prefix(initializedCount)).filter { $0 > 0 }
+            if returnedBytes < processIDs.count * MemoryLayout<pid_t>.stride || capacity == 65_536 {
+                return Array(processIDs.prefix(initializedCount)).filter { $0 > 1 }
             }
             capacity *= 2
         }
         return []
     }
 
-    private static func freezeDescendants(
-        of parentPID: pid_t,
-        visited: inout Set<pid_t>
-    ) -> [pid_t] {
-        var descendants: [pid_t] = []
-        for childPID in directChildPIDs(of: parentPID) where visited.insert(childPID).inserted {
-            _ = kill(childPID, SIGSTOP)
-            descendants.append(contentsOf: freezeDescendants(of: childPID, visited: &visited))
-            descendants.append(childPID)
+    private static func withCStringArray<R>(
+        _ strings: [String],
+        body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) throws -> R
+    ) throws -> R {
+        var pointers = strings.map { strdup($0) }
+        guard pointers.allSatisfy({ $0 != nil }) else {
+            for pointer in pointers where pointer != nil { free(pointer) }
+            throw BackendError.processSetupFailed
         }
-        return descendants
+        pointers.append(nil)
+        defer {
+            for pointer in pointers where pointer != nil { free(pointer) }
+        }
+        return try pointers.withUnsafeMutableBufferPointer {
+            try body($0.baseAddress!)
+        }
     }
 
+    private struct SpawnedBackendProcess {
+        let pid: pid_t
+        let stdout: FileHandle
+        let stderr: FileHandle
+    }
+
+    private static func spawnBackend(
+        location: BackendLocation,
+        arguments: [String],
+        sentinelDescriptor: Int32
+    ) throws -> SpawnedBackendProcess {
+        var stdoutDescriptors = [Int32](repeating: 0, count: 2)
+        guard pipe(&stdoutDescriptors) == 0 else { throw BackendError.processSetupFailed }
+        var stderrDescriptors = [Int32](repeating: 0, count: 2)
+        guard pipe(&stderrDescriptors) == 0 else {
+            close(stdoutDescriptors[0])
+            close(stdoutDescriptors[1])
+            throw BackendError.processSetupFailed
+        }
+        var shouldCloseReadDescriptors = true
+        defer {
+            if shouldCloseReadDescriptors {
+                close(stdoutDescriptors[0])
+                close(stderrDescriptors[0])
+            }
+            close(stdoutDescriptors[1])
+            close(stderrDescriptors[1])
+        }
+
+        var fileActions: posix_spawn_file_actions_t? = nil
+        guard posix_spawn_file_actions_init(&fileActions) == 0 else {
+            throw BackendError.processSetupFailed
+        }
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        // CLOEXEC_DEFAULT closes every unspecified descriptor. Preserve only the
+        // sentinel plus the three standard streams wired below.
+        guard posix_spawn_file_actions_addinherit_np(&fileActions, sentinelDescriptor) == 0,
+              posix_spawn_file_actions_adddup2(
+                  &fileActions,
+                  sentinelDescriptor,
+                  STDIN_FILENO
+              ) == 0,
+              posix_spawn_file_actions_adddup2(
+                  &fileActions,
+                  stdoutDescriptors[1],
+                  STDOUT_FILENO
+              ) == 0,
+              posix_spawn_file_actions_adddup2(
+                  &fileActions,
+                  stderrDescriptors[1],
+                  STDERR_FILENO
+              ) == 0,
+              location.workingDirectory.path.withCString({
+                  posix_spawn_file_actions_addchdir_np(&fileActions, $0)
+              }) == 0
+        else {
+            throw BackendError.processSetupFailed
+        }
+
+        var attributes: posix_spawnattr_t? = nil
+        guard posix_spawnattr_init(&attributes) == 0 else {
+            throw BackendError.processSetupFailed
+        }
+        defer { posix_spawnattr_destroy(&attributes) }
+        let flags = Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+        guard posix_spawnattr_setpgroup(&attributes, 0) == 0,
+              posix_spawnattr_setflags(&attributes, flags) == 0
+        else {
+            throw BackendError.processSetupFailed
+        }
+
+        let argv = [location.pythonURL.path, "-m", "mac_dev_clean"] + arguments
+        let environmentValues = pythonEnvironment(
+            base: ProcessInfo.processInfo.environment,
+            pythonPath: location.pythonPath
+        )
+        let environment = environmentValues.keys.sorted().map {
+            "\($0)=\(environmentValues[$0]!)"
+        }
+        var pid: pid_t = 0
+        let spawnResult = try location.pythonURL.path.withCString { executable in
+            try withCStringArray(argv) { argvPointer in
+                try withCStringArray(environment) { environmentPointer in
+                    posix_spawn(
+                        &pid,
+                        executable,
+                        &fileActions,
+                        &attributes,
+                        argvPointer,
+                        environmentPointer
+                    )
+                }
+            }
+        }
+        guard spawnResult == 0 else { throw BackendError.processSetupFailed }
+
+        shouldCloseReadDescriptors = false
+        return SpawnedBackendProcess(
+            pid: pid,
+            stdout: FileHandle(fileDescriptor: stdoutDescriptors[0], closeOnDealloc: true),
+            stderr: FileHandle(fileDescriptor: stderrDescriptors[0], closeOnDealloc: true)
+        )
+    }
+
+
+    private static func freezeSentinelHolders(
+        at url: URL,
+        visited: inout Set<pid_t>
+    ) -> [pid_t] {
+        // Repeat after freezing the current holders so a descendant created
+        // during the first scan cannot escape the next one.
+        var frozen: [pid_t] = []
+        while true {
+            var foundNewHolder = false
+            for pid in sentinelHolderPIDs(at: url) where visited.insert(pid).inserted {
+                if pid > 1, kill(pid, SIGSTOP) == 0 {
+                    foundNewHolder = true
+                    frozen.append(pid)
+                }
+            }
+            if !foundNewHolder { return frozen }
+        }
+    }
+
+    private static func signalSentinelHolders(
+        _ candidates: [pid_t],
+        at url: URL,
+        signal: Int32
+    ) {
+        let currentHolders = Set(sentinelHolderPIDs(at: url))
+        for pid in candidates where currentHolders.contains(pid) {
+            _ = kill(pid, signal)
+        }
+    }
 
     private static func signalRoot(_ rootPID: pid_t, signal: Int32, ownsProcessGroup: Bool) {
         if ownsProcessGroup {
@@ -261,76 +424,88 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         }
     }
 
-    private static func terminateProcessTree(_ process: Process) async {
-        let rootPID = process.processIdentifier
+    private static func terminateProcessTree(rootPID: pid_t, sentinelURL: URL) async {
         let ownsProcessGroup = getpgid(rootPID) == rootPID
         signalRoot(rootPID, signal: SIGSTOP, ownsProcessGroup: ownsProcessGroup)
 
         var visited: Set<pid_t> = [rootPID]
-        let descendants = freezeDescendants(of: rootPID, visited: &visited)
-        for pid in descendants {
-            _ = kill(pid, SIGTERM)
-        }
+        visited.insert(getpid())
+        let descendants = freezeSentinelHolders(at: sentinelURL, visited: &visited)
+        signalSentinelHolders(descendants, at: sentinelURL, signal: SIGTERM)
         signalRoot(rootPID, signal: SIGTERM, ownsProcessGroup: ownsProcessGroup)
-        for pid in descendants {
-            _ = kill(pid, SIGCONT)
-        }
+        signalSentinelHolders(descendants, at: sentinelURL, signal: SIGCONT)
         signalRoot(rootPID, signal: SIGCONT, ownsProcessGroup: ownsProcessGroup)
-
-        for pid in descendants {
-            _ = kill(pid, SIGKILL)
-        }
-
-        for _ in 0..<10 where process.isRunning {
-            await pollingDelay()
-        }
+        signalSentinelHolders(descendants, at: sentinelURL, signal: SIGKILL)
         signalRoot(rootPID, signal: SIGKILL, ownsProcessGroup: ownsProcessGroup)
+    }
+
+    private static func terminationStatus(from waitStatus: Int32) -> Int32 {
+        let signal = waitStatus & 0x7f
+        if signal == 0 {
+            return (waitStatus >> 8) & 0xff
+        }
+        return 128 + signal
     }
 
     private func run(arguments: [String], honorsCancellation: Bool = false) async throws -> CommandResult {
         let location = location
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.executableURL = location.pythonURL
-        process.arguments = ["-m", "mac_dev_clean"] + arguments
-        process.currentDirectoryURL = location.workingDirectory
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.environment = Self.pythonEnvironment(
-            base: ProcessInfo.processInfo.environment,
-            pythonPath: location.pythonPath
+        let sentinel = try Self.createProcessSentinel()
+        defer {
+            close(sentinel.descriptor)
+            try? FileManager.default.removeItem(at: sentinel.url)
+        }
+        let process = try Self.spawnBackend(
+            location: location,
+            arguments: arguments,
+            sentinelDescriptor: sentinel.descriptor
         )
-
-        try process.run()
         async let stdoutCapture = Self.drainToEnd(
-            stdoutPipe.fileHandleForReading,
+            process.stdout,
             limit: Self.stdoutLimit
         )
         async let stderrCapture = Self.drainToEnd(
-            stderrPipe.fileHandleForReading,
+            process.stderr,
             limit: Self.stderrLimit
         )
 
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: commandTimeout)
+        var waitStatus: Int32 = 0
+        var processExited = false
         var wasCancelled = false
         var didTimeOut = false
-        while process.isRunning {
+        while !processExited {
+            let waitResult = waitpid(process.pid, &waitStatus, WNOHANG)
+            if waitResult == process.pid {
+                processExited = true
+                break
+            }
+            if waitResult == -1, errno != EINTR {
+                throw BackendError.processSetupFailed
+            }
             if honorsCancellation, Task.isCancelled {
                 wasCancelled = true
-                await Self.terminateProcessTree(process)
+                await Self.terminateProcessTree(rootPID: process.pid, sentinelURL: sentinel.url)
                 break
             }
             if clock.now >= deadline {
                 didTimeOut = true
-                await Self.terminateProcessTree(process)
+                await Self.terminateProcessTree(rootPID: process.pid, sentinelURL: sentinel.url)
                 break
             }
             await Self.pollingDelay()
         }
 
-        process.waitUntilExit()
+        if wasCancelled || didTimeOut {
+            while waitpid(process.pid, &waitStatus, 0) == -1, errno == EINTR {}
+        } else {
+            var visited: Set<pid_t> = [getpid(), process.pid]
+            let escaped = Self.freezeSentinelHolders(at: sentinel.url, visited: &visited)
+            Self.signalSentinelHolders(escaped, at: sentinel.url, signal: SIGTERM)
+            Self.signalSentinelHolders(escaped, at: sentinel.url, signal: SIGCONT)
+            Self.signalSentinelHolders(escaped, at: sentinel.url, signal: SIGKILL)
+        }
+
         let stdout = await stdoutCapture
         let stderr = await stderrCapture
         if wasCancelled {
@@ -346,7 +521,7 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         return CommandResult(
             stdout: stdout.data,
             stderr: String(data: stderr.data, encoding: .utf8) ?? "",
-            terminationStatus: process.terminationStatus
+            terminationStatus: Self.terminationStatus(from: waitStatus)
         )
     }
 }

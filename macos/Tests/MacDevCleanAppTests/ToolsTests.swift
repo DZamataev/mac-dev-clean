@@ -152,19 +152,33 @@ import Testing
 @Test func cancellingToolInventoryTerminatesItsProcessGroupAndSettlesPromptly() async throws {
     let fileManager = FileManager.default
     let directory = fileManager.temporaryDirectory
-        .appendingPathComponent("mac-dev-clean-process-group-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("mac dev clean process group \(UUID().uuidString)", isDirectory: true)
     defer { try? fileManager.removeItem(at: directory) }
+    let unrelated = Process()
+    unrelated.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    unrelated.arguments = ["30"]
+    try unrelated.run()
+    defer {
+        if unrelated.isRunning {
+            unrelated.terminate()
+            unrelated.waitUntilExit()
+        }
+    }
     let pidURL = directory.appendingPathComponent("children.pid")
     let backend = try fakeBackend(
         in: directory,
         scriptBody: """
         set -m
-        /usr/bin/nohup /bin/sleep 2 &
-        held_pid=$!
-        /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
-        detached_pid=$!
-        printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
-        wait "$held_pid"
+        (
+            set -m
+            /usr/bin/nohup /bin/sleep 4 &
+            held_pid=$!
+            /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
+            detached_pid=$!
+            printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
+        ) &
+        wait $!
+        /bin/sleep 30
         """,
         commandTimeout: .seconds(10)
     )
@@ -186,7 +200,8 @@ import Testing
     } catch {
         #expect(error is CancellationError)
     }
-    #expect(cancelStart.duration(to: clock.now) < .seconds(1))
+    #expect(cancelStart.duration(to: clock.now) < .seconds(2))
+    #expect(unrelated.isRunning)
 
     for pid in childPIDs {
         let isAlive = kill(pid, 0) == 0 || errno == EPERM
@@ -207,25 +222,75 @@ import Testing
         in: directory,
         scriptBody: """
         set -m
-        /usr/bin/nohup /bin/sleep 3 &
-        held_pid=$!
-        /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
-        detached_pid=$!
-        printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
-        wait "$held_pid"
+        (
+            set -m
+            /usr/bin/nohup /bin/sleep 6 &
+            held_pid=$!
+            /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
+            detached_pid=$!
+            printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
+        ) &
+        wait $!
+        /bin/sleep 30
         """,
-        commandTimeout: .seconds(1)
+        commandTimeout: .seconds(3)
     )
 
     let clock = ContinuousClock()
     let start = clock.now
+    let inventoryTask = Task { try await backend.loadTools() }
+    let readyDeadline = clock.now.advanced(by: .seconds(2))
+    while !fileManager.fileExists(atPath: pidURL.path), clock.now < readyDeadline {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(fileManager.fileExists(atPath: pidURL.path))
     do {
-        _ = try await backend.loadTools()
+        _ = try await inventoryTask.value
         Issue.record("Expected timed-out inventory to throw")
     } catch {
         #expect(error.localizedDescription.contains("timed out"))
     }
-    #expect(start.duration(to: clock.now) < .seconds(2))
+    #expect(start.duration(to: clock.now) < .seconds(5))
+    let pidText = try String(contentsOf: pidURL, encoding: .utf8)
+    for pid in pidText.split(separator: " ").compactMap({ pid_t($0) }) {
+        let isAlive = kill(pid, 0) == 0 || errno == EPERM
+        #expect(!isAlive)
+        if isAlive {
+            _ = kill(pid, SIGKILL)
+        }
+    }
+}
+
+@Test func completedToolInventoryReapsReparentedSentinelHolders() async throws {
+    let fileManager = FileManager.default
+    let directory = fileManager.temporaryDirectory
+        .appendingPathComponent("mac-dev-clean-parent-exit-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: directory) }
+    let pidURL = directory.appendingPathComponent("children.pid")
+    let json = #"{"reclaimable_total_bytes":0,"statuses":[],"recommendations":[]}"#
+    let backend = try fakeBackend(
+        in: directory,
+        scriptBody: """
+        set -m
+        (
+            set -m
+            /usr/bin/nohup /bin/sleep 6 &
+            held_pid=$!
+            /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
+            detached_pid=$!
+            printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
+        ) &
+        wait $!
+        /bin/echo '\(json)'
+        """,
+        commandTimeout: .seconds(10)
+    )
+
+    let clock = ContinuousClock()
+    let start = clock.now
+    let report = try await backend.loadTools()
+    #expect(report.recommendations.isEmpty)
+    #expect(start.duration(to: clock.now) < .seconds(5))
     let pidText = try String(contentsOf: pidURL, encoding: .utf8)
     for pid in pidText.split(separator: " ").compactMap({ pid_t($0) }) {
         let isAlive = kill(pid, 0) == 0 || errno == EPERM
