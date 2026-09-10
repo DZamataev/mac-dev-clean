@@ -10,6 +10,8 @@ final class AppModel: ObservableObject {
         case cleaning
         case deepScanning
         case applying
+        case loadingTools
+        case applyingTool
 
         var message: String {
             switch self {
@@ -18,6 +20,8 @@ final class AppModel: ObservableObject {
             case .cleaning: "Cleaning selected categories…"
             case .deepScanning: "Analysing projects…"
             case .applying: "Removing selected project artifacts…"
+            case .loadingTools: "Checking tool-managed storage…"
+            case .applyingTool: "Running tool-managed cleanup…"
             }
         }
     }
@@ -26,6 +30,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var diskSpace: DiskSpace?
     @Published private(set) var activity: Activity = .idle
     @Published private(set) var deepScanState = DeepScanState()
+    @Published private(set) var toolReport: ToolReport?
     @Published var selectedFlags: Set<String> = []
     @Published var errorMessage: String?
     @Published var warningMessage: String?
@@ -33,26 +38,32 @@ final class AppModel: ObservableObject {
 
     private let backend: (any CleanupBackendProtocol)?
     private let deepScanBackend: (any DeepScanBackendProtocol)?
+    private let toolBackend: (any ToolBackendProtocol)?
     private let startupError: Error?
     private var deepScanTask: Task<Void, Never>?
 
     init(
         backend: (any CleanupBackendProtocol)? = nil,
-        deepScanBackend: (any DeepScanBackendProtocol)? = nil
+        deepScanBackend: (any DeepScanBackendProtocol)? = nil,
+        toolBackend: (any ToolBackendProtocol)? = nil
     ) {
         diskSpace = try? DiskSpace.current()
         if let backend {
             self.backend = backend
             self.deepScanBackend = deepScanBackend
+            self.toolBackend = toolBackend
             startupError = nil
         } else {
             do {
-                self.backend = try CleanupBackend()
+                let cleanupBackend = try CleanupBackend()
+                self.backend = cleanupBackend
                 self.deepScanBackend = deepScanBackend ?? (try? DeepScanBackend())
+                self.toolBackend = toolBackend ?? cleanupBackend
                 startupError = nil
             } catch {
                 self.backend = nil
                 self.deepScanBackend = nil
+                self.toolBackend = nil
                 startupError = error
             }
         }
@@ -134,6 +145,81 @@ final class AppModel: ObservableObject {
         }
         refreshDiskSpace()
         activity = .idle
+    }
+
+    func loadToolsIfNeeded() async {
+        guard toolReport == nil else { return }
+        await loadTools()
+    }
+
+    func loadTools() async {
+        await loadTools(preservingMessages: false)
+    }
+
+    private func loadTools(preservingMessages: Bool) async {
+        guard !isBusy else { return }
+        guard let toolBackend else {
+            errorMessage = startupError?.localizedDescription ?? "The tool inventory is unavailable."
+            warningMessage = nil
+            noticeMessage = nil
+            return
+        }
+
+        activity = .loadingTools
+        if !preservingMessages {
+            dismissMessage()
+        }
+        do {
+            toolReport = try await toolBackend.loadTools()
+        } catch {
+            let refreshFailure = error.localizedDescription
+            if let warningMessage {
+                errorMessage = "\(warningMessage)\n\nTool inventory could not refresh:\n\(refreshFailure)"
+                self.warningMessage = nil
+            } else if noticeMessage != nil {
+                errorMessage = "Tool cleanup finished, but inventory could not refresh:\n\(refreshFailure)"
+                noticeMessage = nil
+            } else {
+                errorMessage = refreshFailure
+            }
+        }
+        refreshDiskSpace()
+        activity = .idle
+    }
+
+    func applyTool(id: String) async {
+        guard !isBusy, let toolBackend else { return }
+        guard let recommendation = toolReport?.recommendations.first(where: { $0.id == id }) else {
+            return
+        }
+
+        activity = .applyingTool
+        dismissMessage()
+        var shouldRefresh = false
+        do {
+            let report = try await toolBackend.applyTool(id: recommendation.id)
+            shouldRefresh = true
+            guard let result = report.results.first(where: { $0.id == recommendation.id }) else {
+                throw BackendError.invalidOutput("Tool cleanup returned a mismatched result.")
+            }
+            let warnings = [result.journalWarning, report.warning ?? ""].filter { !$0.isEmpty }
+            if result.succeeded, warnings.isEmpty {
+                let reported = result.reported.isEmpty ? result.size : result.reported
+                noticeMessage = "Tool cleanup finished for \(result.label). \(reported)"
+            } else if result.succeeded {
+                warningMessage = "Tool cleanup finished for \(result.label). \(warnings.joined(separator: " "))"
+            } else {
+                let reason = result.error.isEmpty ? "The action was not run." : result.error
+                warningMessage = "\(result.label) was not changed. \(reason)"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        activity = .idle
+        refreshDiskSpace()
+        if shouldRefresh {
+            await loadTools(preservingMessages: true)
+        }
     }
 
     func cleanSelected() async {

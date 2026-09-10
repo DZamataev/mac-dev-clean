@@ -66,6 +66,113 @@ struct RecommendationItem: Decodable, Identifiable, Hashable, Sendable {
     }
 }
 
+struct ToolStatus: Decodable, Identifiable, Hashable, Sendable {
+    let tool: String
+    let available: Bool
+    let reason: String
+
+    var id: String { tool }
+}
+
+struct ToolActionPayload: Decodable, Hashable, Sendable {
+    let tool: String
+    let resource: String
+    let argv: [String]
+    let previewArgv: [String]
+    let reported: String
+
+    var displayCommand: String {
+        argv.map(Self.quoteForDisplay).joined(separator: " ")
+    }
+
+    private static func quoteForDisplay(_ argument: String) -> String {
+        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-")
+        if !argument.isEmpty, argument.unicodeScalars.allSatisfy(safe.contains) {
+            return argument
+        }
+        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tool
+        case resource
+        case argv
+        case reported
+        case previewArgv = "preview_argv"
+    }
+}
+
+struct ToolRecommendation: Decodable, Identifiable, Hashable, Sendable {
+    let id: String
+    let detectorId: String
+    let category: String
+    let label: String
+    let size: String
+    let reclaimableBytes: Int64
+    let reason: String
+    let warning: String
+    let selectedByDefault: Bool
+    let toolAction: ToolActionPayload?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case category
+        case label
+        case size
+        case reason
+        case warning
+        case detectorId = "detector_id"
+        case reclaimableBytes = "reclaimable_bytes"
+        case selectedByDefault = "selected_by_default"
+        case toolAction = "tool_action"
+    }
+}
+
+struct ToolReport: Decodable, Sendable {
+    let statuses: [ToolStatus]
+    let recommendations: [ToolRecommendation]
+    let reclaimableTotalBytes: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case statuses
+        case recommendations
+        case reclaimableTotalBytes = "reclaimable_total_bytes"
+    }
+}
+
+struct ToolApplyResult: Decodable, Sendable {
+    let id: String
+    let label: String
+    let path: String
+    let reclaimableBytes: Int64
+    let size: String
+    let outcome: String
+    let dryRun: Bool
+    let error: String
+    let reported: String
+    let journalWarning: String
+
+    var succeeded: Bool { outcome == "invoked" }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case path
+        case size
+        case outcome
+        case error
+        case reported
+        case reclaimableBytes = "reclaimable_bytes"
+        case dryRun = "dry_run"
+        case journalWarning = "journal_warning"
+    }
+}
+
+struct ToolApplyReport: Decodable, Sendable {
+    let results: [ToolApplyResult]
+    let warning: String?
+}
+
 struct ApplyResultItem: Decodable, Sendable {
     let id: String
     let label: String

@@ -3,6 +3,7 @@ import SwiftUI
 enum SidebarPage: String, CaseIterable, Identifiable {
     case cleanup = "Cleanup"
     case deepScan = "Deep Scan"
+    case tools = "Tool-managed"
     case review = "Review Only"
     case about = "About"
 
@@ -11,6 +12,7 @@ enum SidebarPage: String, CaseIterable, Identifiable {
         switch self {
         case .cleanup: "sparkles"
         case .deepScan: "magnifyingglass.circle"
+        case .tools: "wrench.and.screwdriver"
         case .review: "archivebox"
         case .about: "info.circle"
         }
@@ -55,7 +57,15 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 640)
         .toolbar {
             ToolbarItemGroup {
-                if page != .about && page != .deepScan {
+                if page == .tools {
+                    Button {
+                        Task { await model.loadTools() }
+                    } label: {
+                        Label("Refresh Tools", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.isBusy)
+                    .help("Refresh tool-managed storage")
+                } else if page != .about && page != .deepScan {
                     Button {
                         Task { await model.scan() }
                     } label: {
@@ -201,6 +211,8 @@ struct ContentView: View {
             switch page {
             case .review:
                 ReviewOnlyView()
+            case .tools:
+                ToolManagedView()
             case .cleanup, .none:
                 CleanupGroupsView()
             case .deepScan, .about:
@@ -384,6 +396,172 @@ struct LocationRow: View {
             Button("Reveal", action: reveal)
                 .controlSize(.small)
         }
+    }
+}
+
+struct ToolManagedView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var pendingRecommendation: ToolRecommendation?
+    @State private var hasRequestedInitialLoad = false
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                overview
+
+                if let report = model.toolReport {
+                    statuses(report.statuses)
+                    recommendations(report.recommendations)
+                } else if model.activity == .loadingTools {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Checking Docker, Homebrew, Android, and Simulator storage…")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 120)
+                } else {
+                    ContentUnavailableView(
+                        "Tool Inventory Not Loaded",
+                        systemImage: "wrench.and.screwdriver",
+                        description: Text("Use Refresh Tools to inspect storage through each tool's own CLI.")
+                    )
+                    .padding(.top, 50)
+                }
+            }
+            .padding(20)
+        }
+        .task { await requestInitialLoadWhenIdle() }
+        .onChange(of: model.activity) { _, activity in
+            guard activity == .idle else { return }
+            Task { await requestInitialLoadWhenIdle() }
+        }
+        .confirmationDialog(
+            "Run tool-managed cleanup?",
+            isPresented: Binding(
+                get: { pendingRecommendation != nil },
+                set: { if !$0 { pendingRecommendation = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingRecommendation
+        ) { recommendation in
+            Button("Run", role: .destructive) {
+                let id = recommendation.id
+                pendingRecommendation = nil
+                Task { await model.applyTool(id: id) }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingRecommendation = nil
+            }
+        } message: { recommendation in
+            Text(
+                "Command:\n\(recommendation.toolAction?.displayCommand ?? "Unavailable")\n\n"
+                + "mac-dev-clean will preview and revalidate this action before invoking the tool."
+            )
+        }
+    }
+
+    private var overview: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Tool-managed storage")
+                    .font(.title3.bold())
+                Text("Inventory and cleanup use each owner's CLI. Nothing is selected automatically.")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(ByteFormatter.string(model.toolReport?.reclaimableTotalBytes ?? 0))
+                .font(.title3.monospacedDigit().bold())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func statuses(_ statuses: [ToolStatus]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Availability")
+                .font(.headline)
+            ForEach(statuses) { status in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: status.available ? "checkmark.circle.fill" : "minus.circle")
+                        .foregroundStyle(status.available ? .green : .secondary)
+                    Text(status.tool.capitalized)
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    if !status.available {
+                        Text(status.reason.isEmpty ? "Unavailable" : status.reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    @ViewBuilder
+    private func recommendations(_ recommendations: [ToolRecommendation]) -> some View {
+        if recommendations.isEmpty {
+            ContentUnavailableView(
+                "Nothing Reclaimable",
+                systemImage: "checkmark.circle",
+                description: Text("The available tools did not report a supported cleanup action.")
+            )
+            .padding(.top, 36)
+        } else {
+            Text("Recommendations")
+                .font(.headline)
+            ForEach(recommendations) { recommendation in
+                recommendationRow(recommendation)
+            }
+        }
+    }
+
+    private func recommendationRow(_ recommendation: ToolRecommendation) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(recommendation.label)
+                        .font(.headline)
+                    Spacer()
+                    Text(recommendation.size)
+                        .font(.headline.monospacedDigit())
+                }
+                Text(recommendation.reason)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(recommendation.toolAction?.displayCommand ?? "Command unavailable")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if !recommendation.warning.isEmpty {
+                    Text(recommendation.warning)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Run") {
+                pendingRecommendation = recommendation
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .disabled(model.isBusy || recommendation.toolAction == nil)
+        }
+        .padding(14)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.secondary.opacity(0.15))
+        }
+    }
+
+    private func requestInitialLoadWhenIdle() async {
+        guard !hasRequestedInitialLoad, !model.isBusy else { return }
+        hasRequestedInitialLoad = true
+        await model.loadToolsIfNeeded()
     }
 }
 

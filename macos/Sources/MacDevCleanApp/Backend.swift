@@ -40,8 +40,19 @@ protocol CleanupBackendProtocol: Sendable {
     func clean(flags: [String]) async throws -> CleanReport
 }
 
-struct CleanupBackend: CleanupBackendProtocol, Sendable {
+protocol ToolBackendProtocol: Sendable {
+    func loadTools() async throws -> ToolReport
+    func applyTool(id: String) async throws -> ToolApplyReport
+}
+
+struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
     let location: BackendLocation
+
+    static let toolInventoryArguments = ["tools", "--json"]
+
+    static func toolApplyArguments(id: String) -> [String] {
+        ["tools-apply", "--id", id, "--json"]
+    }
 
     init(location: BackendLocation? = nil) throws {
         self.location = try location ?? BackendLocator.locate()
@@ -68,6 +79,22 @@ struct CleanupBackend: CleanupBackendProtocol, Sendable {
         return try Self.cleanReport(from: result)
     }
 
+    func loadTools() async throws -> ToolReport {
+        let result = try await run(arguments: Self.toolInventoryArguments)
+        guard result.terminationStatus == 0 else {
+            throw Self.commandFailure(operation: "tool inventory", result: result)
+        }
+        return try Self.decode(ToolReport.self, from: result.stdout)
+    }
+
+    func applyTool(id: String) async throws -> ToolApplyReport {
+        guard !id.isEmpty else {
+            throw BackendError.invalidOutput("Tool recommendation ID is empty.")
+        }
+        let result = try await run(arguments: Self.toolApplyArguments(id: id))
+        return try Self.toolApplyReport(from: result)
+    }
+
     static func cleanReport(from result: CommandResult) throws -> CleanReport {
         if result.terminationStatus == 0 {
             return try Self.decode(CleanReport.self, from: result.stdout)
@@ -83,6 +110,17 @@ struct CleanupBackend: CleanupBackendProtocol, Sendable {
         }
 
         throw Self.commandFailure(operation: "cleanup", result: result)
+    }
+
+    static func toolApplyReport(from result: CommandResult) throws -> ToolApplyReport {
+        guard result.terminationStatus == 0 || result.terminationStatus == 1 else {
+            throw Self.commandFailure(operation: "tool cleanup", result: result)
+        }
+        let report = try Self.decode(ToolApplyReport.self, from: result.stdout)
+        guard !report.results.isEmpty else {
+            throw Self.commandFailure(operation: "tool cleanup", result: result)
+        }
+        return report
     }
 
     static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -123,6 +161,16 @@ struct CleanupBackend: CleanupBackendProtocol, Sendable {
         return environment
     }
 
+    private static func drainToEnd(_ handle: FileHandle) async -> Data {
+        var data = Data()
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        return data
+    }
+
     private func run(arguments: [String]) async throws -> CommandResult {
         let location = location
         return try await Task.detached(priority: .userInitiated) {
@@ -141,9 +189,11 @@ struct CleanupBackend: CleanupBackendProtocol, Sendable {
             )
 
             try process.run()
+            async let stdoutData = Self.drainToEnd(stdoutPipe.fileHandleForReading)
+            async let stderrBytes = Self.drainToEnd(stderrPipe.fileHandleForReading)
+            let stdout = await stdoutData
+            let stderrData = await stderrBytes
             process.waitUntilExit()
-            let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""
 
             return CommandResult(
