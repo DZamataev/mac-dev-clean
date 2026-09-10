@@ -318,7 +318,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "ENGINE_SOURCE=\"${SRCROOT}/../src/mac_dev_clean\"\nENGINE_DEST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/python/mac_dev_clean\"\n/bin/mkdir -p \"${ENGINE_DEST}/tools\"\n/bin/cp \"${ENGINE_SOURCE}\"/*.py \"${ENGINE_DEST}/\"\n/bin/cp \"${ENGINE_SOURCE}\"/tools/*.py \"${ENGINE_DEST}/tools/\"\n";
+			shellScript = "ENGINE_SOURCE=\"${SRCROOT}/../src/mac_dev_clean\"\nENGINE_DEST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/python/mac_dev_clean\"\ncase \"${ENGINE_DEST}\" in\n  \"${TARGET_BUILD_DIR}\"/*/python/mac_dev_clean) ;;\n  *)\n    echo \"Refusing to replace unexpected Python engine destination.\" >&2\n    exit 1\n    ;;\nesac\n/bin/rm -rf \"${ENGINE_DEST}\"\n/bin/mkdir -p \"${ENGINE_DEST}/tools\"\n/bin/cp \"${ENGINE_SOURCE}\"/*.py \"${ENGINE_DEST}/\"\n/bin/cp \"${ENGINE_SOURCE}\"/tools/*.py \"${ENGINE_DEST}/tools/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

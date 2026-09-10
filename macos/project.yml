@@ -128,6 +128,14 @@ targets:
         script: |
           ENGINE_SOURCE="${SRCROOT}/../src/mac_dev_clean"
           ENGINE_DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/python/mac_dev_clean"
+          case "${ENGINE_DEST}" in
+            "${TARGET_BUILD_DIR}"/*/python/mac_dev_clean) ;;
+            *)
+              echo "Refusing to replace unexpected Python engine destination." >&2
+              exit 1
+              ;;
+          esac
+          /bin/rm -rf "${ENGINE_DEST}"
           /bin/mkdir -p "${ENGINE_DEST}/tools"
           /bin/cp "${ENGINE_SOURCE}"/*.py "${ENGINE_DEST}/"
           /bin/cp "${ENGINE_SOURCE}"/tools/*.py "${ENGINE_DEST}/tools/"

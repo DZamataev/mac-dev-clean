@@ -10,6 +10,7 @@ SIGNING_IDENTITY=${MACOS_SIGNING_IDENTITY:--}
 APP="$ROOT/dist/mac-dev-clean.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
+PYTHON_DEST="$RESOURCES/python/mac_dev_clean"
 VERSION=${MACOS_VERSION:-$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' "$ROOT/pyproject.toml" | head -1)}
 BUILD_NUMBER=${MACOS_BUILD_NUMBER:-$VERSION}
 BUNDLE_IDENTIFIER=${MACOS_BUNDLE_IDENTIFIER:-com.ravenvector.mac-dev-clean}
@@ -40,7 +41,12 @@ for ARCH in "${ARCHS[@]}"; do
     BINARIES+=("$BIN_DIR/MacDevCleanApp")
 done
 
-mkdir -p "$CONTENTS/MacOS" "$RESOURCES/python/mac_dev_clean/tools"
+if [ "$PYTHON_DEST" != "$APP/Contents/Resources/python/mac_dev_clean" ]; then
+    echo "Refusing to replace unexpected Python engine destination." >&2
+    exit 1
+fi
+rm -rf "$PYTHON_DEST"
+mkdir -p "$CONTENTS/MacOS" "$PYTHON_DEST/tools"
 if [ "${#BINARIES[@]}" -eq 1 ]; then
     cp "${BINARIES[0]}" "$CONTENTS/MacOS/MacDevCleanApp"
 else
@@ -53,8 +59,8 @@ cp "$ROOT/raven_vector_logos/raven-vector-dark.png" "$RESOURCES/raven-vector-dar
 cp "$ROOT/raven_vector_logos/raven-vector-dark-trans.png" "$RESOURCES/raven-vector-dark-trans.png"
 cp "$ROOT/LICENSE" "$RESOURCES/LICENSE"
 cp "$ROOT/BRANDING.md" "$RESOURCES/BRANDING.md"
-cp "$ROOT"/src/mac_dev_clean/*.py "$RESOURCES/python/mac_dev_clean/"
-cp "$ROOT"/src/mac_dev_clean/tools/*.py "$RESOURCES/python/mac_dev_clean/tools/"
+cp "$ROOT"/src/mac_dev_clean/*.py "$PYTHON_DEST/"
+cp "$ROOT"/src/mac_dev_clean/tools/*.py "$PYTHON_DEST/tools/"
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"
