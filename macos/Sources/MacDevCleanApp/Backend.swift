@@ -7,6 +7,7 @@ enum BackendError: LocalizedError {
     case commandFailed(operation: String, code: Int32, details: String)
     case commandTimedOut
     case outputLimitExceeded
+    case processContainmentFailed
     case processSetupFailed
     case invalidOutput(String)
 
@@ -25,6 +26,8 @@ enum BackendError: LocalizedError {
             return "The cleanup engine timed out. Its previous recommendations are no longer actionable."
         case .outputLimitExceeded:
             return "The cleanup engine exceeded the safe output limit. Its output was discarded."
+        case .processContainmentFailed:
+            return "The cleanup engine could not verify that its process scope was contained."
         case .processSetupFailed:
             return "The cleanup engine could not start in a confined process scope."
         case let .invalidOutput(message):
@@ -223,7 +226,14 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         }
     }
 
-    private static func createProcessSentinel() throws -> (url: URL, descriptor: Int32) {
+    private struct ProcessSentinel {
+        let url: URL
+        let descriptor: Int32
+        let device: UInt32
+        let inode: UInt64
+    }
+
+    private static func createProcessSentinel() throws -> ProcessSentinel {
         // The inherited descriptor remains a stable ownership marker after fork,
         // reparenting, or process-group changes. A per-run random path prevents
         // accidental selection of an unrelated same-user process.
@@ -233,34 +243,146 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
             open($0, O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR)
         }
         guard descriptor >= 0 else { throw BackendError.processSetupFailed }
-        return (url, descriptor)
+        var fileStatus = stat()
+        guard fstat(descriptor, &fileStatus) == 0 else {
+            close(descriptor)
+            try? FileManager.default.removeItem(at: url)
+            throw BackendError.processSetupFailed
+        }
+        return ProcessSentinel(
+            url: url,
+            descriptor: descriptor,
+            device: UInt32(bitPattern: fileStatus.st_dev),
+            inode: fileStatus.st_ino
+        )
     }
 
-    private static func sentinelHolderPIDs(at url: URL) -> [pid_t] {
+    private static func pathSentinelHolderPIDs(at url: URL) -> [pid_t]? {
         var capacity = 32
         while capacity <= 65_536 {
             var processIDs = [pid_t](repeating: 0, count: capacity)
-            let returnedBytes = url.path.withCString {
-                proc_listpidspath(
-                    UInt32(PROC_ALL_PIDS),
-                    0,
-                    $0,
-                    0,
-                    &processIDs,
-                    Int32(processIDs.count * MemoryLayout<pid_t>.stride)
-                )
+            let returnedBytes = url.path.withCString { path in
+                processIDs.withUnsafeMutableBytes {
+                    proc_listpidspath(
+                        UInt32(PROC_ALL_PIDS),
+                        0,
+                        path,
+                        0,
+                        $0.baseAddress,
+                        Int32($0.count)
+                    )
+                }
             }
-            guard returnedBytes >= 0 else { return [] }
+            guard returnedBytes >= 0 else { return nil }
             let initializedCount = min(
                 Int(returnedBytes) / MemoryLayout<pid_t>.stride,
                 capacity
             )
-            if returnedBytes < processIDs.count * MemoryLayout<pid_t>.stride || capacity == 65_536 {
+            if returnedBytes < processIDs.count * MemoryLayout<pid_t>.stride {
                 return Array(processIDs.prefix(initializedCount)).filter { $0 > 1 }
             }
+            if capacity == 65_536 { return nil }
             capacity *= 2
         }
-        return []
+        return nil
+    }
+
+    private static func processIDsForCurrentUser() -> [pid_t]? {
+        var capacity = 256
+        while capacity <= 65_536 {
+            var processIDs = [pid_t](repeating: 0, count: capacity)
+            let returnedBytes = processIDs.withUnsafeMutableBytes {
+                proc_listpids(
+                    UInt32(PROC_UID_ONLY),
+                    UInt32(getuid()),
+                    $0.baseAddress,
+                    Int32($0.count)
+                )
+            }
+            guard returnedBytes >= 0 else { return nil }
+            let initializedCount = min(
+                Int(returnedBytes) / MemoryLayout<pid_t>.stride,
+                capacity
+            )
+            if returnedBytes < processIDs.count * MemoryLayout<pid_t>.stride {
+                return Array(processIDs.prefix(initializedCount)).filter { $0 > 1 }
+            }
+            if capacity == 65_536 { return nil }
+            capacity *= 2
+        }
+        return nil
+    }
+
+    private static func fileDescriptors(of pid: pid_t) -> [proc_fdinfo]? {
+        let requiredBytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard requiredBytes > 0 else { return nil }
+        var capacity = max(
+            Int(requiredBytes) / MemoryLayout<proc_fdinfo>.stride + 32,
+            32
+        )
+        while capacity <= 65_536 {
+            var descriptors = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+            let returnedBytes = descriptors.withUnsafeMutableBytes {
+                proc_pidinfo(
+                    pid,
+                    PROC_PIDLISTFDS,
+                    0,
+                    $0.baseAddress,
+                    Int32($0.count)
+                )
+            }
+            guard returnedBytes > 0 else { return nil }
+            let initializedCount = min(
+                Int(returnedBytes) / MemoryLayout<proc_fdinfo>.stride,
+                capacity
+            )
+            let bufferBytes = descriptors.count * MemoryLayout<proc_fdinfo>.stride
+            if Int(returnedBytes) + MemoryLayout<proc_fdinfo>.stride < bufferBytes {
+                return Array(descriptors.prefix(initializedCount))
+            }
+            if capacity == 65_536 { return nil }
+            capacity = min(capacity * 2, 65_536)
+        }
+        return nil
+    }
+
+    private static func vnodeSentinelHolderPIDs(_ sentinel: ProcessSentinel) -> [pid_t]? {
+        guard let processIDs = processIDsForCurrentUser() else { return nil }
+        var holders: [pid_t] = []
+        for pid in processIDs {
+            guard let descriptors = fileDescriptors(of: pid) else { continue }
+            for descriptor in descriptors where descriptor.proc_fdtype == PROX_FDTYPE_VNODE {
+                var vnode = vnode_fdinfo()
+                let returnedBytes = proc_pidfdinfo(
+                    pid,
+                    descriptor.proc_fd,
+                    PROC_PIDFDVNODEINFO,
+                    &vnode,
+                    Int32(MemoryLayout<vnode_fdinfo>.size)
+                )
+                if returnedBytes == MemoryLayout<vnode_fdinfo>.size,
+                   vnode.pvi.vi_stat.vst_dev == sentinel.device,
+                   vnode.pvi.vi_stat.vst_ino == sentinel.inode {
+                    holders.append(pid)
+                    break
+                }
+            }
+        }
+        return holders.contains(getpid()) ? holders : nil
+    }
+
+    private static func sentinelHolderPIDs(_ sentinel: ProcessSentinel) throws -> [pid_t] {
+        // A descendant can unlink the pathname while every inherited descriptor
+        // still references the vnode. Fall back to device/inode enumeration and
+        // require the parent-held descriptor as a scanner health check.
+        if let pathHolders = pathSentinelHolderPIDs(at: sentinel.url),
+           pathHolders.contains(getpid()) {
+            return pathHolders
+        }
+        guard let vnodeHolders = vnodeSentinelHolderPIDs(sentinel) else {
+            throw BackendError.processContainmentFailed
+        }
+        return vnodeHolders
     }
 
     private static func withCStringArray<R>(
@@ -387,15 +509,15 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
 
 
     private static func freezeSentinelHolders(
-        at url: URL,
+        _ sentinel: ProcessSentinel,
         visited: inout Set<pid_t>
-    ) -> [pid_t] {
+    ) throws -> [pid_t] {
         // Repeat after freezing the current holders so a descendant created
         // during the first scan cannot escape the next one.
         var frozen: [pid_t] = []
         while true {
             var foundNewHolder = false
-            for pid in sentinelHolderPIDs(at: url) where visited.insert(pid).inserted {
+            for pid in try sentinelHolderPIDs(sentinel) where visited.insert(pid).inserted {
                 if pid > 1, kill(pid, SIGSTOP) == 0 {
                     foundNewHolder = true
                     frozen.append(pid)
@@ -407,10 +529,10 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
 
     private static func signalSentinelHolders(
         _ candidates: [pid_t],
-        at url: URL,
+        sentinel: ProcessSentinel,
         signal: Int32
-    ) {
-        let currentHolders = Set(sentinelHolderPIDs(at: url))
+    ) throws {
+        let currentHolders = Set(try sentinelHolderPIDs(sentinel))
         for pid in candidates where currentHolders.contains(pid) {
             _ = kill(pid, signal)
         }
@@ -424,19 +546,23 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         }
     }
 
-    private static func terminateProcessTree(rootPID: pid_t, sentinelURL: URL) async {
+    private static func terminateProcessTree(rootPID: pid_t, sentinel: ProcessSentinel) async throws {
         let ownsProcessGroup = getpgid(rootPID) == rootPID
         signalRoot(rootPID, signal: SIGSTOP, ownsProcessGroup: ownsProcessGroup)
 
-        var visited: Set<pid_t> = [rootPID]
-        visited.insert(getpid())
-        let descendants = freezeSentinelHolders(at: sentinelURL, visited: &visited)
-        signalSentinelHolders(descendants, at: sentinelURL, signal: SIGTERM)
-        signalRoot(rootPID, signal: SIGTERM, ownsProcessGroup: ownsProcessGroup)
-        signalSentinelHolders(descendants, at: sentinelURL, signal: SIGCONT)
-        signalRoot(rootPID, signal: SIGCONT, ownsProcessGroup: ownsProcessGroup)
-        signalSentinelHolders(descendants, at: sentinelURL, signal: SIGKILL)
-        signalRoot(rootPID, signal: SIGKILL, ownsProcessGroup: ownsProcessGroup)
+        do {
+            var visited: Set<pid_t> = [rootPID, getpid()]
+            let descendants = try freezeSentinelHolders(sentinel, visited: &visited)
+            try signalSentinelHolders(descendants, sentinel: sentinel, signal: SIGTERM)
+            signalRoot(rootPID, signal: SIGTERM, ownsProcessGroup: ownsProcessGroup)
+            try signalSentinelHolders(descendants, sentinel: sentinel, signal: SIGCONT)
+            signalRoot(rootPID, signal: SIGCONT, ownsProcessGroup: ownsProcessGroup)
+            try signalSentinelHolders(descendants, sentinel: sentinel, signal: SIGKILL)
+            signalRoot(rootPID, signal: SIGKILL, ownsProcessGroup: ownsProcessGroup)
+        } catch {
+            signalRoot(rootPID, signal: SIGKILL, ownsProcessGroup: ownsProcessGroup)
+            throw error
+        }
     }
 
     private static func terminationStatus(from waitStatus: Int32) -> Int32 {
@@ -474,6 +600,7 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         var processExited = false
         var wasCancelled = false
         var didTimeOut = false
+        var containmentFailed = false
         while !processExited {
             let waitResult = waitpid(process.pid, &waitStatus, WNOHANG)
             if waitResult == process.pid {
@@ -485,12 +612,20 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
             }
             if honorsCancellation, Task.isCancelled {
                 wasCancelled = true
-                await Self.terminateProcessTree(rootPID: process.pid, sentinelURL: sentinel.url)
+                do {
+                    try await Self.terminateProcessTree(rootPID: process.pid, sentinel: sentinel)
+                } catch {
+                    containmentFailed = true
+                }
                 break
             }
             if clock.now >= deadline {
                 didTimeOut = true
-                await Self.terminateProcessTree(rootPID: process.pid, sentinelURL: sentinel.url)
+                do {
+                    try await Self.terminateProcessTree(rootPID: process.pid, sentinel: sentinel)
+                } catch {
+                    containmentFailed = true
+                }
                 break
             }
             await Self.pollingDelay()
@@ -499,15 +634,26 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         if wasCancelled || didTimeOut {
             while waitpid(process.pid, &waitStatus, 0) == -1, errno == EINTR {}
         } else {
-            var visited: Set<pid_t> = [getpid(), process.pid]
-            let escaped = Self.freezeSentinelHolders(at: sentinel.url, visited: &visited)
-            Self.signalSentinelHolders(escaped, at: sentinel.url, signal: SIGTERM)
-            Self.signalSentinelHolders(escaped, at: sentinel.url, signal: SIGCONT)
-            Self.signalSentinelHolders(escaped, at: sentinel.url, signal: SIGKILL)
+            do {
+                var visited: Set<pid_t> = [getpid(), process.pid]
+                let escaped = try Self.freezeSentinelHolders(sentinel, visited: &visited)
+                try Self.signalSentinelHolders(escaped, sentinel: sentinel, signal: SIGTERM)
+                try Self.signalSentinelHolders(escaped, sentinel: sentinel, signal: SIGCONT)
+                try Self.signalSentinelHolders(escaped, sentinel: sentinel, signal: SIGKILL)
+            } catch {
+                containmentFailed = true
+            }
+        }
+        if containmentFailed {
+            try? process.stdout.close()
+            try? process.stderr.close()
         }
 
         let stdout = await stdoutCapture
         let stderr = await stderrCapture
+        if containmentFailed {
+            throw BackendError.processContainmentFailed
+        }
         if wasCancelled {
             throw CancellationError()
         }

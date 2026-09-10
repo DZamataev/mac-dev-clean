@@ -165,19 +165,11 @@ import Testing
         }
     }
     let pidURL = directory.appendingPathComponent("children.pid")
+    let helperURL = try escapingProcessHelper(in: directory)
     let backend = try fakeBackend(
         in: directory,
         scriptBody: """
-        set -m
-        (
-            set -m
-            /usr/bin/nohup /bin/sleep 4 &
-            held_pid=$!
-            /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
-            detached_pid=$!
-            printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
-        ) &
-        wait $!
+        /usr/bin/python3 '\(helperURL.path)' '\(pidURL.path)'
         /bin/sleep 30
         """,
         commandTimeout: .seconds(10)
@@ -218,19 +210,11 @@ import Testing
         .appendingPathComponent("mac-dev-clean-timeout-\(UUID().uuidString)", isDirectory: true)
     defer { try? fileManager.removeItem(at: directory) }
     let pidURL = directory.appendingPathComponent("children.pid")
+    let helperURL = try escapingProcessHelper(in: directory)
     let backend = try fakeBackend(
         in: directory,
         scriptBody: """
-        set -m
-        (
-            set -m
-            /usr/bin/nohup /bin/sleep 6 &
-            held_pid=$!
-            /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
-            detached_pid=$!
-            printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
-        ) &
-        wait $!
+        /usr/bin/python3 '\(helperURL.path)' '\(pidURL.path)'
         /bin/sleep 30
         """,
         commandTimeout: .seconds(3)
@@ -268,19 +252,13 @@ import Testing
     defer { try? fileManager.removeItem(at: directory) }
     let pidURL = directory.appendingPathComponent("children.pid")
     let json = #"{"reclaimable_total_bytes":0,"statuses":[],"recommendations":[]}"#
+    let helperURL = try escapingProcessHelper(in: directory)
     let backend = try fakeBackend(
         in: directory,
         scriptBody: """
-        set -m
-        (
-            set -m
-            /usr/bin/nohup /bin/sleep 6 &
-            held_pid=$!
-            /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
-            detached_pid=$!
-            printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
-        ) &
-        wait $!
+        sentinel_path=$(/usr/bin/python3 -c 'import fcntl; print(fcntl.fcntl(0, 50, bytes(1024)).split(b"\\0", 1)[0].decode())')
+        /bin/rm -f "$sentinel_path"
+        /usr/bin/python3 '\(helperURL.path)' '\(pidURL.path)'
         /bin/echo '\(json)'
         """,
         commandTimeout: .seconds(10)
@@ -876,6 +854,55 @@ private enum ToolBackendStubError: LocalizedError {
             "indeterminate tool apply"
         }
     }
+}
+
+private func escapingProcessHelper(in directory: URL) throws -> URL {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let helperURL = directory.appendingPathComponent("double-fork-helper.py")
+    let source = #"""
+    import os
+    import signal
+    import sys
+    import time
+
+    pid_path = sys.argv[1]
+    first = os.fork()
+    if first:
+        os.waitpid(first, 0)
+        deadline = time.monotonic() + 2
+        while not os.path.exists(pid_path) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        os._exit(0 if os.path.exists(pid_path) else 2)
+
+    os.setsid()
+    second = os.fork()
+    if second:
+        os._exit(0)
+
+    held = os.fork()
+    if held == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        time.sleep(6)
+        os._exit(0)
+
+    detached = os.fork()
+    if detached == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        time.sleep(30)
+        os._exit(0)
+
+    with open(pid_path, "w", encoding="utf-8") as handle:
+        handle.write(f"{held} {detached}")
+    os._exit(0)
+    """#
+    try Data(source.utf8).write(to: helperURL)
+    return helperURL
 }
 
 private func fakeBackend(
