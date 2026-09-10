@@ -279,11 +279,17 @@ def analyze_android(
             if size <= 0:
                 continue
             detector_id, label = group
+            identity = package.version
+            package_segments = package.path.split(";")
+            if package_segments[0] == "platforms":
+                identity = package_segments[1]
+            elif package_segments[0] == "system-images":
+                identity = ";".join(package_segments[1:])
             items.append(
                 Recommendation(
                     detector_id=detector_id,
                     category="tool-managed",
-                    label="{} {}".format(label, package.version),
+                    label="{} {}".format(label, identity),
                     path=location,
                     action=ActionKind.INVOKE_TOOL,
                     allocated_bytes=size,

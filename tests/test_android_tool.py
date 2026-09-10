@@ -343,6 +343,49 @@ Path: {path}
             self.assertIn("avdmanager inventory provenance", unavailable)
             self.assertLessEqual(len(unavailable), MAX_STDERR_CHARS)
 
+    def test_platform_labels_use_package_identity_instead_of_duplicate_revisions(self):
+        sdk_output = """Installed packages:
+Path | Version | Description | Location
+platforms;android-33 | 3 | Android SDK Platform 33 | platforms/android-33
+platforms;android-34 | 3 | Android SDK Platform 34 | platforms/android-34
+system-images;android-34;google apis;arm64 | 3 | Android system image A | system-images/android-34/google apis/arm64
+system-images;android-34;google;apis arm64 | 3 | Android system image B | system-images/android-34/google/apis arm64
+system-images;android-34;google_apis_playstore;arm64-v8a | 3 | Android system image | system-images/android-34/google_apis_playstore/arm64-v8a
+"""
+
+        def sdk_runner(argv):
+            return ToolResult(tuple(argv), sdk_output, "", 0)
+
+        def avd_runner(argv):
+            return ToolResult(tuple(argv), "", "", 0)
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            sdk = Path(raw_tmp)
+            for location in (
+                "platforms/android-33",
+                "platforms/android-34",
+                "system-images/android-34/google apis/arm64",
+                "system-images/android-34/google/apis arm64",
+                "system-images/android-34/google_apis_playstore/arm64-v8a",
+            ):
+                package = sdk / location
+                package.mkdir(parents=True)
+                (package / "blob").write_bytes(b"x")
+
+            items, unavailable = analyze_android(sdk_runner, avd_runner, 11, sdk)
+
+        self.assertIsNone(unavailable)
+        self.assertEqual(
+            [item.label for item in items],
+            [
+                "Android system image android-34;google apis;arm64",
+                "Android system image android-34;google;apis arm64",
+                "Android system image android-34;google_apis_playstore;arm64-v8a",
+                "Android platform android-33",
+                "Android platform android-34",
+            ],
+        )
+
     def test_sdk_recommendation_has_exact_metadata_and_action_identity(self):
         sdk_output = """Installed packages:
 Path | Version | Description | Location

@@ -198,9 +198,9 @@ final class AppModel: ObservableObject {
             return
         }
 
-        toolReport = nil
         activity = .applyingTool
         dismissMessage()
+        var requiresRefresh = true
         do {
             let report = try await toolBackend.applyTool(id: recommendation.id)
             guard let result = report.results.first(where: { $0.id == recommendation.id }) else {
@@ -212,6 +212,17 @@ final class AppModel: ObservableObject {
             let label = !resultLabel.isEmpty
                 ? resultLabel
                 : (reviewedLabel.isEmpty ? "Tool action" : reviewedLabel)
+            if result.succeeded {
+                if let currentReport = toolReport {
+                    let remaining = currentReport.recommendations.filter { $0.id != result.id }
+                    toolReport = ToolReport(
+                        statuses: currentReport.statuses,
+                        recommendations: remaining,
+                        reclaimableTotalBytes: remaining.reduce(0) { $0 + $1.reclaimableBytes }
+                    )
+                }
+                requiresRefresh = false
+            }
             if result.succeeded, warnings.isEmpty {
                 let reported = result.reported.isEmpty ? result.size : result.reported
                 noticeMessage = "Tool cleanup finished for \(label). \(reported)"
@@ -227,7 +238,9 @@ final class AppModel: ObservableObject {
         }
         activity = .idle
         refreshDiskSpace()
-        await loadTools(preservingMessages: true)
+        if requiresRefresh {
+            await loadTools(preservingMessages: true)
+        }
     }
 
     func cleanSelected() async {

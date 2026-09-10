@@ -418,7 +418,7 @@ import Testing
 }
 
 @MainActor
-@Test func appModelAppliesOneCurrentToolIdThenRefreshesTheGeneration() async {
+@Test func appModelAppliesOneCurrentToolIdWithoutRefreshingAllTools() async {
     let state = StubToolBackendState(
         reports: [
             toolReport(recommendations: [toolRecommendation()]),
@@ -435,7 +435,7 @@ import Testing
     await model.applyTool(id: "persisted-id")
 
     #expect(await state.appliedIds == ["persisted-id"])
-    #expect(await state.loadCount == 2)
+    #expect(await state.loadCount == 1)
     #expect(model.toolReport?.recommendations.isEmpty == true)
     #expect(model.noticeMessage?.contains("Docker build cache") == true)
     #expect(model.activity == .idle)
