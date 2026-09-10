@@ -25,9 +25,9 @@ All notable changes to this project will be documented in this file.
   selection, and official Docker, Homebrew, Android, and `simctl` commands.
 - Added a native Tool-managed Storage page with status, command preview,
   selection, confirmation, progress, refusal, and refresh states.
-- Added an append-only, rotating local action journal for previews, refusals,
-  failures, skipped dry runs, and successful actions, plus `journal` inspection
-  and explicit `journal --clear`.
+- Added an append-only, rotating local action journal for cleanup/apply attempts,
+  including refusals, failures, skipped dry runs, and successful actions, plus
+  active-segment `journal` inspection and explicit `journal --clear`.
 - Extended the same journal to legacy clean and confirmed interactive cleanup.
 
 ## 0.5.2 - 2026-07-11

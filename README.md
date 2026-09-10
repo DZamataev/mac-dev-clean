@@ -423,16 +423,17 @@ Nothing is selected automatically.
 
 Docker inventory covers default-prune build cache, dangling images, stopped
 containers, and unused anonymous volumes. It deliberately does not offer
-`docker image prune -a`: that command also removes deliberately pulled tagged
-images not attached to a running container, which is broader than the previewed
-reclaimable class. Docker's class-wide figures can also be upper bounds, and
-space inside Docker Desktop's disk image may not return to the macOS volume
-until Docker compacts it.
+`docker image prune -a`: that command removes tagged and untagged images not
+referenced by any container, including images pulled deliberately. That is
+broader than the offered dangling-image action and its preview. Docker's
+class-wide figures can also be upper bounds, and space inside Docker Desktop's
+disk image may not return to the macOS volume until Docker compacts it.
 
 Homebrew's number comes from `brew cleanup -n`, not from measuring only
 `~/Library/Caches/Homebrew`. It can include old installed formula versions,
 stale downloads, and Homebrew-managed runtime files elsewhere under the
 Homebrew prefix, so the figure can differ from the cache directory's size.
+Displayed KB/MB/GB values use decimal SI scaling, matching Docker and Homebrew.
 
 Android SDK packages and Android Virtual Devices (AVDs) are inventory-only
 during `tools`: no component, emulator, app, or device data is changed. A real
@@ -530,16 +531,21 @@ directories outside iCloud Drive.
 
 ### Action journal
 
-Every preview, refusal, error, skipped dry run, and successful cleanup attempt is
-appended locally to `~/Library/Logs/mac-dev-clean/actions.jsonl`. Records include
-the timestamp, opaque recommendation ID when applicable, category and target,
-exact argv that was executed, dry-run flag, outcome, reported reclaimable
-bytes, and bounded detail suitable for auditing. The journal may contain local
-paths and command arguments; review it before sharing.
+Each cleanup or apply attempt — including a refusal, error, skipped dry run, or
+successful action — is appended locally to
+`~/Library/Logs/mac-dev-clean/actions.jsonl`. Records include the timestamp,
+opaque recommendation ID when applicable, category and target, the preview or
+action argv associated with the attempt, dry-run flag, outcome, reported
+reclaimable bytes, and bounded detail suitable for auditing. An argv records
+what was requested for that attempt; a refusal can be journaled before a
+process starts. Read-only `scan`, `report`, and `tools` inventory are not
+journaled. The journal may contain local paths and command arguments; review it
+before sharing.
 
 The journal is never uploaded and is not included in shared diagnostics. It is
-bounded by rotation and retains one rotated segment. Inspect it with
-`mac-dev-clean journal`, or explicitly remove both the active and rotated local
+bounded by rotation and retains one rotated segment. `mac-dev-clean journal`
+shows the active segment only; inspect `actions.jsonl.1` directly when older
+retained records are needed. Explicitly remove both active and rotated local
 files with:
 
 ```sh

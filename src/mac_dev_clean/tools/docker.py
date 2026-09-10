@@ -43,11 +43,11 @@ class _ResourceClass:
     confidence: Confidence
 
 
-#: `docker image prune -a` is deliberately absent. It removes every image not
-#: attached to a *running* container, which is far broader than the
-#: `Reclaimable` figure `system df` reports and would delete images the user
-#: pulled on purpose. Offering it would break the rule that an executed vector
-#: matches the effect its preview described.
+#: `docker image prune -a` is deliberately absent. It removes tagged and
+#: untagged images not referenced by any container, including deliberately
+#: pulled images, which is far broader than the dangling-image action offered
+#: here. Offering it would break the rule that an executed vector matches the
+#: effect its preview described.
 _CLASSES = (
     _ResourceClass(
         docker_type="Build Cache",

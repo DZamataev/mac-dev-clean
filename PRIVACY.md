@@ -15,15 +15,18 @@
 
 ## Local action journal
 
-Preview, refusal, failure, skipped dry-run, and successful cleanup outcomes are
-recorded in the append-only local journal at
+Cleanup and apply attempts — including refusal, failure, skipped dry-run, and
+successful outcomes — are recorded in the append-only local journal at
 `~/Library/Logs/mac-dev-clean/actions.jsonl`. Records can contain local paths,
-opaque recommendation IDs, exact command arguments, sizes, timestamps, and
-bounded outcome details. The journal is never uploaded and is excluded from
-shared diagnostics.
+opaque recommendation IDs, the preview or action command arguments associated
+with an attempt, sizes, timestamps, and bounded outcome details. A refusal may
+record a requested vector even when no process was started. Read-only inventory
+is not journaled. The journal is never uploaded and is excluded from shared
+diagnostics.
 
-The file is size-bounded and retains one local rotated segment. You can inspect
-it with `mac-dev-clean journal` and explicitly remove both segments with
+The file is size-bounded and retains one local rotated segment. `mac-dev-clean
+journal` reads only the active segment; older retained records remain in
+`actions.jsonl.1`. You can explicitly remove both segments with
 `mac-dev-clean journal --clear`.
 
 ## Network and iCloud behavior
