@@ -51,8 +51,8 @@ final class AppModel: ObservableObject {
         if let backend {
             self.backend = backend
             self.deepScanBackend = deepScanBackend
-            self.toolBackend = toolBackend
-            startupError = nil
+            self.toolBackend = toolBackend ?? (backend as? any ToolBackendProtocol)
+            self.startupError = nil
         } else {
             do {
                 let cleanupBackend = try CleanupBackend()
@@ -133,7 +133,9 @@ final class AppModel: ObservableObject {
             }
         } catch {
             let refreshFailure = error.localizedDescription
-            if let warningMessage {
+            if preservingMessages, let errorMessage {
+                self.errorMessage = "\(errorMessage)\n\nStorage totals could not refresh:\n\(refreshFailure)"
+            } else if let warningMessage {
                 errorMessage = "\(warningMessage)\n\nThe cleanup finished, but storage totals could not refresh:\n\(refreshFailure)"
                 self.warningMessage = nil
             } else if noticeMessage != nil {
@@ -158,6 +160,7 @@ final class AppModel: ObservableObject {
 
     private func loadTools(preservingMessages: Bool) async {
         guard !isBusy else { return }
+        toolReport = nil
         guard let toolBackend else {
             errorMessage = startupError?.localizedDescription ?? "The tool inventory is unavailable."
             warningMessage = nil
@@ -173,7 +176,9 @@ final class AppModel: ObservableObject {
             toolReport = try await toolBackend.loadTools()
         } catch {
             let refreshFailure = error.localizedDescription
-            if let warningMessage {
+            if preservingMessages, let errorMessage {
+                self.errorMessage = "\(errorMessage)\n\nTool inventory could not refresh:\n\(refreshFailure)"
+            } else if let warningMessage {
                 errorMessage = "\(warningMessage)\n\nTool inventory could not refresh:\n\(refreshFailure)"
                 self.warningMessage = nil
             } else if noticeMessage != nil {
@@ -193,33 +198,32 @@ final class AppModel: ObservableObject {
             return
         }
 
+        toolReport = nil
         activity = .applyingTool
         dismissMessage()
-        var shouldRefresh = false
         do {
             let report = try await toolBackend.applyTool(id: recommendation.id)
-            shouldRefresh = true
             guard let result = report.results.first(where: { $0.id == recommendation.id }) else {
                 throw BackendError.invalidOutput("Tool cleanup returned a mismatched result.")
             }
             let warnings = [result.journalWarning, report.warning ?? ""].filter { !$0.isEmpty }
+            let label = result.label.isEmpty ? recommendation.label : result.label
             if result.succeeded, warnings.isEmpty {
                 let reported = result.reported.isEmpty ? result.size : result.reported
-                noticeMessage = "Tool cleanup finished for \(result.label). \(reported)"
+                noticeMessage = "Tool cleanup finished for \(label). \(reported)"
             } else if result.succeeded {
-                warningMessage = "Tool cleanup finished for \(result.label). \(warnings.joined(separator: " "))"
+                warningMessage = "Tool cleanup finished for \(label). \(warnings.joined(separator: " "))"
             } else {
                 let reason = result.error.isEmpty ? "The action was not run." : result.error
-                warningMessage = "\(result.label) was not changed. \(reason)"
+                let details = ([reason] + warnings).joined(separator: " ")
+                warningMessage = "\(label) was not changed. \(details)"
             }
         } catch {
             errorMessage = error.localizedDescription
         }
         activity = .idle
         refreshDiskSpace()
-        if shouldRefresh {
-            await loadTools(preservingMessages: true)
-        }
+        await loadTools(preservingMessages: true)
     }
 
     func cleanSelected() async {
@@ -227,6 +231,8 @@ final class AppModel: ObservableObject {
         let flags = selectedGroups.map(\.rule.flag).sorted()
         guard !flags.isEmpty else { return }
 
+        report = nil
+        selectedFlags.removeAll()
         activity = .cleaning
         errorMessage = nil
         warningMessage = nil
@@ -239,16 +245,13 @@ final class AppModel: ObservableObject {
             } else {
                 warningMessage = Self.cleanupWarning(for: result)
             }
-            activity = .idle
-            selectedFlags.removeAll()
-            await scan(preservingMessages: true)
         } catch {
             errorMessage = error.localizedDescription
             warningMessage = nil
             noticeMessage = nil
-            refreshDiskSpace()
-            activity = .idle
         }
+        activity = .idle
+        await scan(preservingMessages: true)
     }
 
     var deepScanSelectionSummary: String {

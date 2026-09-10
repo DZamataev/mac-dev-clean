@@ -4,6 +4,8 @@ enum BackendError: LocalizedError {
     case sourceNotFound
     case pythonNotFound
     case commandFailed(operation: String, code: Int32, details: String)
+    case commandTimedOut
+    case outputLimitExceeded
     case invalidOutput(String)
 
     var errorDescription: String? {
@@ -17,6 +19,10 @@ enum BackendError: LocalizedError {
                 ? "The cleanup engine did not return a reason."
                 : details
             return "The \(operation) could not finish. No additional files will be removed.\n\(reason)\n\nDiagnostic code: \(code)"
+        case .commandTimedOut:
+            return "The cleanup engine timed out. Its previous recommendations are no longer actionable."
+        case .outputLimitExceeded:
+            return "The cleanup engine exceeded the safe output limit. Its output was discarded."
         case let .invalidOutput(message):
             return "mac-dev-clean returned invalid data.\n\(message)"
         }
@@ -47,6 +53,10 @@ protocol ToolBackendProtocol: Sendable {
 
 struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
     let location: BackendLocation
+    let commandTimeout: Duration
+
+    private static let stdoutLimit = 8 * 1_024 * 1_024
+    private static let stderrLimit = 64 * 1_024
 
     static let toolInventoryArguments = ["tools", "--json"]
 
@@ -54,8 +64,9 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         ["tools-apply", "--id", id, "--json"]
     }
 
-    init(location: BackendLocation? = nil) throws {
+    init(location: BackendLocation? = nil, commandTimeout: Duration = .seconds(300)) throws {
         self.location = try location ?? BackendLocator.locate()
+        self.commandTimeout = commandTimeout
     }
 
     func scan() async throws -> ScanReport {
@@ -64,7 +75,7 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
             "--json",
             "--no-node-modules",
             "--no-project-derived-data",
-        ])
+        ], honorsCancellation: true)
         guard result.terminationStatus == 0 else {
             throw Self.commandFailure(operation: "scan", result: result)
         }
@@ -75,12 +86,14 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         guard !flags.isEmpty else {
             return CleanReport(totalBytes: 0, total: "0 B", count: 0, items: [])
         }
+        // Once a destructive command is handed off, incidental Task cancellation
+        // must not hide its authoritative result. The process remains timeout-bounded.
         let result = try await run(arguments: ["clean"] + flags + ["--json"])
         return try Self.cleanReport(from: result)
     }
 
     func loadTools() async throws -> ToolReport {
-        let result = try await run(arguments: Self.toolInventoryArguments)
+        let result = try await run(arguments: Self.toolInventoryArguments, honorsCancellation: true)
         guard result.terminationStatus == 0 else {
             throw Self.commandFailure(operation: "tool inventory", result: result)
         }
@@ -91,8 +104,10 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         guard !id.isEmpty else {
             throw BackendError.invalidOutput("Tool recommendation ID is empty.")
         }
+        // As with path cleanup, finish the handed-off action unless the hard timeout
+        // fires; killing it on view-task cancellation would make the result ambiguous.
         let result = try await run(arguments: Self.toolApplyArguments(id: id))
-        return try Self.toolApplyReport(from: result)
+        return try Self.toolApplyReport(from: result, requestedID: id)
     }
 
     static func cleanReport(from result: CommandResult) throws -> CleanReport {
@@ -112,13 +127,26 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         throw Self.commandFailure(operation: "cleanup", result: result)
     }
 
-    static func toolApplyReport(from result: CommandResult) throws -> ToolApplyReport {
+    static func toolApplyReport(from result: CommandResult, requestedID: String) throws -> ToolApplyReport {
         guard result.terminationStatus == 0 || result.terminationStatus == 1 else {
             throw Self.commandFailure(operation: "tool cleanup", result: result)
         }
         let report = try Self.decode(ToolApplyReport.self, from: result.stdout)
-        guard !report.results.isEmpty else {
-            throw Self.commandFailure(operation: "tool cleanup", result: result)
+        guard report.results.count == 1,
+              let item = report.results.first,
+              item.id == requestedID,
+              !item.dryRun
+        else {
+            throw BackendError.invalidOutput("Tool cleanup returned an invalid result contract.")
+        }
+        let statusMatchesOutcome = switch (result.terminationStatus, item.outcome) {
+        case (0, "invoked"), (1, "failed"), (1, "skipped"):
+            true
+        default:
+            false
+        }
+        guard statusMatchesOutcome else {
+            throw BackendError.invalidOutput("Tool cleanup returned an inconsistent outcome.")
         }
         return report
     }
@@ -127,8 +155,7 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         do {
             return try JSONDecoder().decode(type, from: data)
         } catch {
-            let raw = String(data: data, encoding: .utf8) ?? "No readable output"
-            throw BackendError.invalidOutput("\(error.localizedDescription)\n\(raw)")
+            throw BackendError.invalidOutput("The cleanup engine returned malformed JSON.")
         }
     }
 
@@ -161,47 +188,97 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         return environment
     }
 
-    private static func drainToEnd(_ handle: FileHandle) async -> Data {
+    private struct CapturedStream: Sendable {
+        let data: Data
+        let exceededLimit: Bool
+    }
+
+    private static func drainToEnd(_ handle: FileHandle, limit: Int) async -> CapturedStream {
         var data = Data()
+        var exceededLimit = false
         while true {
             let chunk = handle.availableData
             if chunk.isEmpty { break }
-            data.append(chunk)
+            let remaining = max(0, limit - data.count)
+            if remaining > 0 {
+                data.append(chunk.prefix(remaining))
+            }
+            if chunk.count > remaining {
+                exceededLimit = true
+            }
         }
-        return data
+        return CapturedStream(data: data, exceededLimit: exceededLimit)
     }
 
-    private func run(arguments: [String]) async throws -> CommandResult {
+    private static func pollingDelay() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(20)) {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func run(arguments: [String], honorsCancellation: Bool = false) async throws -> CommandResult {
         let location = location
-        return try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.executableURL = location.pythonURL
-            process.arguments = ["-m", "mac_dev_clean"] + arguments
-            process.currentDirectoryURL = location.workingDirectory
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = location.pythonURL
+        process.arguments = ["-m", "mac_dev_clean"] + arguments
+        process.currentDirectoryURL = location.workingDirectory
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = Self.pythonEnvironment(
+            base: ProcessInfo.processInfo.environment,
+            pythonPath: location.pythonPath
+        )
 
-            process.environment = Self.pythonEnvironment(
-                base: ProcessInfo.processInfo.environment,
-                pythonPath: location.pythonPath
-            )
+        try process.run()
+        async let stdoutCapture = Self.drainToEnd(
+            stdoutPipe.fileHandleForReading,
+            limit: Self.stdoutLimit
+        )
+        async let stderrCapture = Self.drainToEnd(
+            stderrPipe.fileHandleForReading,
+            limit: Self.stderrLimit
+        )
 
-            try process.run()
-            async let stdoutData = Self.drainToEnd(stdoutPipe.fileHandleForReading)
-            async let stderrBytes = Self.drainToEnd(stderrPipe.fileHandleForReading)
-            let stdout = await stdoutData
-            let stderrData = await stderrBytes
-            process.waitUntilExit()
-            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: commandTimeout)
+        var wasCancelled = false
+        var didTimeOut = false
+        while process.isRunning {
+            if honorsCancellation, Task.isCancelled {
+                wasCancelled = true
+                process.terminate()
+                break
+            }
+            if clock.now >= deadline {
+                didTimeOut = true
+                process.terminate()
+                break
+            }
+            await Self.pollingDelay()
+        }
 
-            return CommandResult(
-                stdout: stdout,
-                stderr: stderr,
-                terminationStatus: process.terminationStatus
-            )
-        }.value
+        process.waitUntilExit()
+        let stdout = await stdoutCapture
+        let stderr = await stderrCapture
+        if wasCancelled {
+            throw CancellationError()
+        }
+        if didTimeOut {
+            throw BackendError.commandTimedOut
+        }
+        if stdout.exceededLimit || stderr.exceededLimit {
+            throw BackendError.outputLimitExceeded
+        }
+
+        return CommandResult(
+            stdout: stdout.data,
+            stderr: String(data: stderr.data, encoding: .utf8) ?? "",
+            terminationStatus: process.terminationStatus
+        )
     }
 }
 

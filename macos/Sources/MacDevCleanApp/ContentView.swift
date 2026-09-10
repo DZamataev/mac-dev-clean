@@ -17,6 +17,15 @@ enum SidebarPage: String, CaseIterable, Identifiable {
         case .about: "info.circle"
         }
     }
+
+    var showsPrimaryScanProgress: Bool {
+        switch self {
+        case .cleanup, .review:
+            true
+        case .tools, .deepScan, .about:
+            false
+        }
+    }
 }
 
 struct ContentView: View {
@@ -201,7 +210,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.report == nil && model.isBusy {
+        if page?.showsPrimaryScanProgress == true && model.report == nil && model.isBusy {
             ContentUnavailableView {
                 Label("Scanning", systemImage: "internaldrive")
             } description: {
