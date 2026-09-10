@@ -127,14 +127,45 @@ targets:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/xcode_sim_prune.py
         script: |
           ENGINE_SOURCE="${SRCROOT}/../src/mac_dev_clean"
-          ENGINE_DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/python/mac_dev_clean"
-          case "${ENGINE_DEST}" in
-            "${TARGET_BUILD_DIR}"/*/python/mac_dev_clean) ;;
+          case "${WRAPPER_NAME}" in
+            ""|*/*|.|..|.app)
+              echo "Refusing to replace unexpected Python engine destination." >&2
+              exit 1
+              ;;
+            *.app) ;;
             *)
               echo "Refusing to replace unexpected Python engine destination." >&2
               exit 1
               ;;
           esac
+          if [ -z "${TARGET_BUILD_DIR}" ]; then
+            echo "Refusing to replace unexpected Python engine destination." >&2
+            exit 1
+          fi
+          EXPECTED_RESOURCES_PATH="${WRAPPER_NAME}/Contents/Resources"
+          if [ "${UNLOCALIZED_RESOURCES_FOLDER_PATH}" != "${EXPECTED_RESOURCES_PATH}" ]; then
+            echo "Refusing to replace unexpected Python engine destination." >&2
+            exit 1
+          fi
+          TARGET_BUILD_REAL=$(CDPATH='' cd -P -- "${TARGET_BUILD_DIR}" && pwd -P) || exit 1
+          RESOURCES_DEST="${TARGET_BUILD_DIR}/${EXPECTED_RESOURCES_PATH}"
+          RESOURCES_REAL=$(CDPATH='' cd -P -- "${RESOURCES_DEST}" && pwd -P) || exit 1
+          if [ "${RESOURCES_REAL}" != "${TARGET_BUILD_REAL}/${EXPECTED_RESOURCES_PATH}" ]; then
+            echo "Refusing to replace unexpected Python engine destination." >&2
+            exit 1
+          fi
+          PYTHON_PARENT="${RESOURCES_DEST}/python"
+          if [ -L "${PYTHON_PARENT}" ]; then
+            echo "Refusing to replace unexpected Python engine destination." >&2
+            exit 1
+          fi
+          /bin/mkdir -p "${PYTHON_PARENT}"
+          PYTHON_PARENT_REAL=$(CDPATH='' cd -P -- "${PYTHON_PARENT}" && pwd -P) || exit 1
+          if [ "${PYTHON_PARENT_REAL}" != "${RESOURCES_REAL}/python" ]; then
+            echo "Refusing to replace unexpected Python engine destination." >&2
+            exit 1
+          fi
+          ENGINE_DEST="${PYTHON_PARENT}/mac_dev_clean"
           /bin/rm -rf "${ENGINE_DEST}"
           /bin/mkdir -p "${ENGINE_DEST}/tools"
           /bin/cp "${ENGINE_SOURCE}"/*.py "${ENGINE_DEST}/"

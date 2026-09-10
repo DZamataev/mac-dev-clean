@@ -1,13 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." && pwd -P)
 PACKAGE="$ROOT/macos"
 CONFIGURATION=${CONFIGURATION:-release}
 DEPLOYMENT_TARGET=${MACOS_DEPLOYMENT_TARGET:-14.0}
 ARCHS_VALUE=${MACOS_ARCHS:-$(uname -m)}
 SIGNING_IDENTITY=${MACOS_SIGNING_IDENTITY:--}
-APP="$ROOT/dist/mac-dev-clean.app"
+DIST="$ROOT/dist"
+APP="$DIST/mac-dev-clean.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
 PYTHON_DEST="$RESOURCES/python/mac_dev_clean"
@@ -17,6 +18,17 @@ BUNDLE_IDENTIFIER=${MACOS_BUNDLE_IDENTIFIER:-com.ravenvector.mac-dev-clean}
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Could not determine a valid X.Y.Z app version." >&2
+    exit 1
+fi
+
+if [ -L "$DIST" ]; then
+    echo "Refusing to replace unexpected app bundle destination." >&2
+    exit 1
+fi
+mkdir -p "$DIST"
+DIST_REAL=$(CDPATH='' cd -P -- "$DIST" && pwd -P) || exit 1
+if [ "$DIST_REAL" != "$DIST" ]; then
+    echo "Refusing to replace unexpected app bundle destination." >&2
     exit 1
 fi
 
@@ -41,11 +53,7 @@ for ARCH in "${ARCHS[@]}"; do
     BINARIES+=("$BIN_DIR/MacDevCleanApp")
 done
 
-if [ "$PYTHON_DEST" != "$APP/Contents/Resources/python/mac_dev_clean" ]; then
-    echo "Refusing to replace unexpected Python engine destination." >&2
-    exit 1
-fi
-rm -rf "$PYTHON_DEST"
+/bin/rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$PYTHON_DEST/tools"
 if [ "${#BINARIES[@]}" -eq 1 ]; then
     cp "${BINARIES[0]}" "$CONTENTS/MacOS/MacDevCleanApp"
