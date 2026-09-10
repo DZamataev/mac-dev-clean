@@ -40,7 +40,7 @@ for ARCH in "${ARCHS[@]}"; do
     BINARIES+=("$BIN_DIR/MacDevCleanApp")
 done
 
-mkdir -p "$CONTENTS/MacOS" "$RESOURCES/python/mac_dev_clean"
+mkdir -p "$CONTENTS/MacOS" "$RESOURCES/python/mac_dev_clean/tools"
 if [ "${#BINARIES[@]}" -eq 1 ]; then
     cp "${BINARIES[0]}" "$CONTENTS/MacOS/MacDevCleanApp"
 else
@@ -54,6 +54,7 @@ cp "$ROOT/raven_vector_logos/raven-vector-dark-trans.png" "$RESOURCES/raven-vect
 cp "$ROOT/LICENSE" "$RESOURCES/LICENSE"
 cp "$ROOT/BRANDING.md" "$RESOURCES/BRANDING.md"
 cp "$ROOT"/src/mac_dev_clean/*.py "$RESOURCES/python/mac_dev_clean/"
+cp "$ROOT"/src/mac_dev_clean/tools/*.py "$RESOURCES/python/mac_dev_clean/tools/"
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"

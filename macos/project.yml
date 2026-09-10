@@ -27,14 +27,19 @@ targets:
         buildPhase: resources
       - path: ../assets/mac-dev-clean-logo.png
         buildPhase: resources
+        group: mac-dev-clean/assets
       - path: ../raven_vector_logos/raven-vector-dark.png
         buildPhase: resources
+        group: mac-dev-clean/raven_vector_logos
       - path: ../raven_vector_logos/raven-vector-dark-trans.png
         buildPhase: resources
+        group: mac-dev-clean/raven_vector_logos
       - path: ../LICENSE
         buildPhase: resources
+        group: mac-dev-clean
       - path: ../BRANDING.md
         buildPhase: resources
+        group: mac-dev-clean
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ravenvector.mac-dev-clean
@@ -72,6 +77,7 @@ targets:
           - $(SRCROOT)/../src/mac_dev_clean/executor.py
           - $(SRCROOT)/../src/mac_dev_clean/fsevents.py
           - $(SRCROOT)/../src/mac_dev_clean/index.py
+          - $(SRCROOT)/../src/mac_dev_clean/journal.py
           - $(SRCROOT)/../src/mac_dev_clean/model.py
           - $(SRCROOT)/../src/mac_dev_clean/output.py
           - $(SRCROOT)/../src/mac_dev_clean/policy.py
@@ -79,6 +85,15 @@ targets:
           - $(SRCROOT)/../src/mac_dev_clean/recommendation.py
           - $(SRCROOT)/../src/mac_dev_clean/scanner.py
           - $(SRCROOT)/../src/mac_dev_clean/sim_prune.py
+          - $(SRCROOT)/../src/mac_dev_clean/tool_executor.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/__init__.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/android.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/docker.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/homebrew.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/registry.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/runner.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/simulator.py
+          - $(SRCROOT)/../src/mac_dev_clean/tools/sizes.py
           - $(SRCROOT)/../src/mac_dev_clean/xcode_sim_prune.py
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/__init__.py
@@ -92,6 +107,7 @@ targets:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/executor.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/fsevents.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/index.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/journal.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/model.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/output.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/policy.py
@@ -99,12 +115,22 @@ targets:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/recommendation.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/scanner.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/sim_prune.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tool_executor.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/__init__.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/android.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/docker.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/homebrew.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/registry.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/runner.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/simulator.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/tools/sizes.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/xcode_sim_prune.py
         script: |
           ENGINE_SOURCE="${SRCROOT}/../src/mac_dev_clean"
           ENGINE_DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/python/mac_dev_clean"
-          /bin/mkdir -p "${ENGINE_DEST}"
+          /bin/mkdir -p "${ENGINE_DEST}/tools"
           /bin/cp "${ENGINE_SOURCE}"/*.py "${ENGINE_DEST}/"
+          /bin/cp "${ENGINE_SOURCE}"/tools/*.py "${ENGINE_DEST}/tools/"
     scheme:
       gatherCoverageData: true
       testTargets:
