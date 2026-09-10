@@ -517,7 +517,14 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         var frozen: [pid_t] = []
         while true {
             var foundNewHolder = false
-            for pid in try sentinelHolderPIDs(sentinel) where visited.insert(pid).inserted {
+            let holders: [pid_t]
+            do {
+                holders = try sentinelHolderPIDs(sentinel)
+            } catch {
+                killFrozenProcesses(frozen)
+                throw error
+            }
+            for pid in holders where visited.insert(pid).inserted {
                 if pid > 1, kill(pid, SIGSTOP) == 0 {
                     foundNewHolder = true
                     frozen.append(pid)
@@ -538,6 +545,14 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         }
     }
 
+    private static func killFrozenProcesses(_ processIDs: [pid_t]) {
+        // These PIDs were stopped by this runner and cannot voluntarily exit or
+        // be reused. Kill them directly if a later ownership revalidation fails.
+        for pid in processIDs {
+            _ = kill(pid, SIGKILL)
+        }
+    }
+
     private static func signalRoot(_ rootPID: pid_t, signal: Int32, ownsProcessGroup: Bool) {
         if ownsProcessGroup {
             _ = kill(-rootPID, signal)
@@ -550,16 +565,16 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         let ownsProcessGroup = getpgid(rootPID) == rootPID
         signalRoot(rootPID, signal: SIGSTOP, ownsProcessGroup: ownsProcessGroup)
 
+        var descendants: [pid_t] = []
         do {
             var visited: Set<pid_t> = [rootPID, getpid()]
-            let descendants = try freezeSentinelHolders(sentinel, visited: &visited)
+            descendants = try freezeSentinelHolders(sentinel, visited: &visited)
             try signalSentinelHolders(descendants, sentinel: sentinel, signal: SIGTERM)
             signalRoot(rootPID, signal: SIGTERM, ownsProcessGroup: ownsProcessGroup)
-            try signalSentinelHolders(descendants, sentinel: sentinel, signal: SIGCONT)
-            signalRoot(rootPID, signal: SIGCONT, ownsProcessGroup: ownsProcessGroup)
             try signalSentinelHolders(descendants, sentinel: sentinel, signal: SIGKILL)
             signalRoot(rootPID, signal: SIGKILL, ownsProcessGroup: ownsProcessGroup)
         } catch {
+            killFrozenProcesses(descendants)
             signalRoot(rootPID, signal: SIGKILL, ownsProcessGroup: ownsProcessGroup)
             throw error
         }
@@ -634,13 +649,14 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         if wasCancelled || didTimeOut {
             while waitpid(process.pid, &waitStatus, 0) == -1, errno == EINTR {}
         } else {
+            var escaped: [pid_t] = []
             do {
                 var visited: Set<pid_t> = [getpid(), process.pid]
-                let escaped = try Self.freezeSentinelHolders(sentinel, visited: &visited)
+                escaped = try Self.freezeSentinelHolders(sentinel, visited: &visited)
                 try Self.signalSentinelHolders(escaped, sentinel: sentinel, signal: SIGTERM)
-                try Self.signalSentinelHolders(escaped, sentinel: sentinel, signal: SIGCONT)
                 try Self.signalSentinelHolders(escaped, sentinel: sentinel, signal: SIGKILL)
             } catch {
+                Self.killFrozenProcesses(escaped)
                 containmentFailed = true
             }
         }
