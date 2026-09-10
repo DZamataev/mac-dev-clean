@@ -207,7 +207,11 @@ final class AppModel: ObservableObject {
                 throw BackendError.invalidOutput("Tool cleanup returned a mismatched result.")
             }
             let warnings = [result.journalWarning, report.warning ?? ""].filter { !$0.isEmpty }
-            let label = result.label.isEmpty ? recommendation.label : result.label
+            let resultLabel = result.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let reviewedLabel = recommendation.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = !resultLabel.isEmpty
+                ? resultLabel
+                : (reviewedLabel.isEmpty ? "Tool action" : reviewedLabel)
             if result.succeeded, warnings.isEmpty {
                 let reported = result.reported.isEmpty ? result.size : result.reported
                 noticeMessage = "Tool cleanup finished for \(label). \(reported)"

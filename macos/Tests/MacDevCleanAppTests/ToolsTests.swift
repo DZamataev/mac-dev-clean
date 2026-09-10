@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import MacDevCleanApp
@@ -148,22 +149,90 @@ import Testing
     }
 }
 
+@Test func cancellingToolInventoryTerminatesItsProcessGroupAndSettlesPromptly() async throws {
+    let fileManager = FileManager.default
+    let directory = fileManager.temporaryDirectory
+        .appendingPathComponent("mac-dev-clean-process-group-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: directory) }
+    let pidURL = directory.appendingPathComponent("children.pid")
+    let backend = try fakeBackend(
+        in: directory,
+        scriptBody: """
+        set -m
+        /usr/bin/nohup /bin/sleep 2 &
+        held_pid=$!
+        /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
+        detached_pid=$!
+        printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
+        wait "$held_pid"
+        """,
+        commandTimeout: .seconds(10)
+    )
+    let task = Task { try await backend.loadTools() }
+    let clock = ContinuousClock()
+    let readyDeadline = clock.now.advanced(by: .seconds(3))
+    while !fileManager.fileExists(atPath: pidURL.path), clock.now < readyDeadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let pidText = try String(contentsOf: pidURL, encoding: .utf8)
+    let childPIDs = pidText.split(separator: " ").compactMap { pid_t($0) }
+    #expect(childPIDs.count == 2)
+
+    let cancelStart = clock.now
+    task.cancel()
+    do {
+        _ = try await task.value
+        Issue.record("Expected cancelled inventory to throw")
+    } catch {
+        #expect(error is CancellationError)
+    }
+    #expect(cancelStart.duration(to: clock.now) < .seconds(1))
+
+    for pid in childPIDs {
+        let isAlive = kill(pid, 0) == 0 || errno == EPERM
+        #expect(!isAlive)
+        if isAlive {
+            _ = kill(pid, SIGKILL)
+        }
+    }
+}
+
 @Test func toolInventoryTimesOutAHungBackendProcess() async throws {
     let fileManager = FileManager.default
     let directory = fileManager.temporaryDirectory
         .appendingPathComponent("mac-dev-clean-timeout-\(UUID().uuidString)", isDirectory: true)
     defer { try? fileManager.removeItem(at: directory) }
+    let pidURL = directory.appendingPathComponent("children.pid")
     let backend = try fakeBackend(
         in: directory,
-        scriptBody: "trap '' TERM\nwhile :; do /bin/sleep 1; done",
-        commandTimeout: .milliseconds(100)
+        scriptBody: """
+        set -m
+        /usr/bin/nohup /bin/sleep 3 &
+        held_pid=$!
+        /usr/bin/nohup /bin/sleep 30 >/dev/null 2>&1 &
+        detached_pid=$!
+        printf '%s %s' "$held_pid" "$detached_pid" > "\(pidURL.path)"
+        wait "$held_pid"
+        """,
+        commandTimeout: .seconds(1)
     )
 
+    let clock = ContinuousClock()
+    let start = clock.now
     do {
         _ = try await backend.loadTools()
         Issue.record("Expected timed-out inventory to throw")
     } catch {
         #expect(error.localizedDescription.contains("timed out"))
+    }
+    #expect(start.duration(to: clock.now) < .seconds(2))
+    let pidText = try String(contentsOf: pidURL, encoding: .utf8)
+    for pid in pidText.split(separator: " ").compactMap({ pid_t($0) }) {
+        let isAlive = kill(pid, 0) == 0 || errno == EPERM
+        #expect(!isAlive)
+        if isAlive {
+            _ = kill(pid, SIGKILL)
+        }
     }
 }
 
@@ -176,7 +245,7 @@ import Testing
     let backend = try fakeBackend(
         in: directory,
         scriptBody: "/bin/sleep 0.1\n/bin/echo '\(json)'",
-        commandTimeout: .seconds(1)
+        commandTimeout: .seconds(3)
     )
 
     let task = Task { try await backend.applyTool(id: "persisted-id") }
@@ -476,6 +545,43 @@ import Testing
 }
 
 @MainActor
+@Test func failedToolApplyUsesAGenericLabelWhenBothLabelsAreBlank() async {
+    let failed = ToolApplyReport(
+        results: [
+            ToolApplyResult(
+                id: "persisted-id",
+                label: "",
+                path: "docker:build-cache",
+                reclaimableBytes: 10,
+                size: "10 B",
+                outcome: "failed",
+                dryRun: false,
+                error: "refused",
+                reported: "",
+                journalWarning: ""
+            ),
+        ],
+        warning: nil
+    )
+    let state = StubToolBackendState(
+        reports: [
+            toolReport(recommendations: [toolRecommendation(label: "   ")]),
+            toolReport(recommendations: []),
+        ],
+        applyReport: failed
+    )
+    let model = AppModel(
+        backend: ToolsEmptyCleanupBackend(),
+        toolBackend: StubToolBackend(state: state)
+    )
+
+    await model.loadTools()
+    await model.applyTool(id: "persisted-id")
+
+    #expect(model.warningMessage == "Tool action was not changed. refused")
+}
+
+@MainActor
 @Test func applyAndRefreshFailuresPreserveBothErrorsWithoutAStaleReport() async {
     let state = StubToolBackendState(
         reports: [toolReport(recommendations: [toolRecommendation()])],
@@ -528,12 +634,12 @@ import Testing
     #expect(model.errorMessage?.contains("storage scan refresh failed") == true)
 }
 
-private func toolRecommendation() -> ToolRecommendation {
+private func toolRecommendation(label: String = "Docker build cache") -> ToolRecommendation {
     ToolRecommendation(
         id: "persisted-id",
         detectorId: "docker-build-cache",
         category: "tool-managed",
-        label: "Docker build cache",
+        label: label,
         size: "10 B",
         reclaimableBytes: 10,
         reason: "Docker reports reclaimable build cache.",

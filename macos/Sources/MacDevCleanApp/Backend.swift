@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum BackendError: LocalizedError {
@@ -193,6 +194,7 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         let exceededLimit: Bool
     }
 
+
     private static func drainToEnd(_ handle: FileHandle, limit: Int) async -> CapturedStream {
         var data = Data()
         var exceededLimit = false
@@ -216,6 +218,73 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
                 continuation.resume()
             }
         }
+    }
+
+    private static func directChildPIDs(of parentPID: pid_t) -> [pid_t] {
+        var capacity = 32
+        while capacity <= 65_536 {
+            var children = [pid_t](repeating: 0, count: capacity)
+            let count = proc_listchildpids(
+                parentPID,
+                &children,
+                Int32(children.count * MemoryLayout<pid_t>.stride)
+            )
+            guard count >= 0 else { return [] }
+            if count < capacity || capacity == 65_536 {
+                let initializedCount = min(Int(count), capacity)
+                return Array(children.prefix(initializedCount)).filter { $0 > 0 }
+            }
+            capacity *= 2
+        }
+        return []
+    }
+
+    private static func freezeDescendants(
+        of parentPID: pid_t,
+        visited: inout Set<pid_t>
+    ) -> [pid_t] {
+        var descendants: [pid_t] = []
+        for childPID in directChildPIDs(of: parentPID) where visited.insert(childPID).inserted {
+            _ = kill(childPID, SIGSTOP)
+            descendants.append(contentsOf: freezeDescendants(of: childPID, visited: &visited))
+            descendants.append(childPID)
+        }
+        return descendants
+    }
+
+
+    private static func signalRoot(_ rootPID: pid_t, signal: Int32, ownsProcessGroup: Bool) {
+        if ownsProcessGroup {
+            _ = kill(-rootPID, signal)
+        } else {
+            _ = kill(rootPID, signal)
+        }
+    }
+
+    private static func terminateProcessTree(_ process: Process) async {
+        let rootPID = process.processIdentifier
+        let ownsProcessGroup = getpgid(rootPID) == rootPID
+        signalRoot(rootPID, signal: SIGSTOP, ownsProcessGroup: ownsProcessGroup)
+
+        var visited: Set<pid_t> = [rootPID]
+        let descendants = freezeDescendants(of: rootPID, visited: &visited)
+        for pid in descendants {
+            _ = kill(pid, SIGTERM)
+        }
+        signalRoot(rootPID, signal: SIGTERM, ownsProcessGroup: ownsProcessGroup)
+        for pid in descendants {
+            _ = kill(pid, SIGCONT)
+        }
+        signalRoot(rootPID, signal: SIGCONT, ownsProcessGroup: ownsProcessGroup)
+
+        for pid in descendants {
+            _ = kill(pid, SIGKILL)
+        }
+
+        for _ in 0..<10 where process.isRunning {
+            await pollingDelay()
+        }
+        signalRoot(rootPID, signal: SIGKILL, ownsProcessGroup: ownsProcessGroup)
     }
 
     private func run(arguments: [String], honorsCancellation: Bool = false) async throws -> CommandResult {
@@ -250,12 +319,12 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
         while process.isRunning {
             if honorsCancellation, Task.isCancelled {
                 wasCancelled = true
-                process.terminate()
+                await Self.terminateProcessTree(process)
                 break
             }
             if clock.now >= deadline {
                 didTimeOut = true
-                process.terminate()
+                await Self.terminateProcessTree(process)
                 break
             }
             await Self.pollingDelay()
