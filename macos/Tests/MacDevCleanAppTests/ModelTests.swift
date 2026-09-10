@@ -89,8 +89,8 @@ import Testing
 }
 
 @Test func byteFormattingMatchesThePythonCLI() {
-    #expect(ByteFormatter.string(699 * 1024 * 1024) == "699.0 MB")
-    #expect(ByteFormatter.string(1024 * 1024 * 1024) == "1.0 GB")
+    #expect(ByteFormatter.string(699 * 1024 * 1024) == "733.0 MB")
+    #expect(ByteFormatter.string(1024 * 1024 * 1024) == "1.1 GB")
 }
 
 @Test func diskSpaceFormatsFreeAndTotalCapacity() {
@@ -99,8 +99,8 @@ import Testing
         totalBytes: 1_000 * 1024 * 1024 * 1024
     )
 
-    #expect(diskSpace.free == "250.0 GB")
-    #expect(diskSpace.total == "1000.0 GB")
+    #expect(diskSpace.free == "268.4 GB")
+    #expect(diskSpace.total == "1.1 TB")
 }
 
 @Test func ravenVectorWebsiteUsesSecureCanonicalURL() {

@@ -63,8 +63,8 @@ def human_bytes(size: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB", "PB"]
     value = float(size)
     for unit in units:
-        if abs(value) < 1024 or unit == units[-1]:
+        if abs(value) < 1000 or unit == units[-1]:
             if unit == "B":
                 return f"{int(value)} {unit}"
             return f"{value:.1f} {unit}"
-        value /= 1024
+        value /= 1000

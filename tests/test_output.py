@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from mac_dev_clean.model import CleanResult, ScanTarget
+from mac_dev_clean.model import CleanResult, ScanTarget, human_bytes
 from mac_dev_clean.output import (
     clean_report_json,
     render_clean_table,
@@ -12,6 +12,12 @@ from mac_dev_clean.output import (
 
 
 class OutputTests(unittest.TestCase):
+    def test_human_bytes_uses_si_scaling_for_decimal_unit_labels(self):
+        self.assertEqual(human_bytes(999), "999 B")
+        self.assertEqual(human_bytes(1_000), "1.0 KB")
+        self.assertEqual(human_bytes(799_800_000), "799.8 MB")
+        self.assertEqual(human_bytes(1_000_000_000), "1.0 GB")
+
     def test_render_scan_table_suggests_top_cleanable_dry_runs(self):
         items = [
             ScanTarget(
@@ -45,8 +51,8 @@ class OutputTests(unittest.TestCase):
 
         output = render_scan_table(items)
 
-        self.assertIn("Cleanable:    14.0 GB across 2 item(s)", output)
-        self.assertIn("Review only:  1.0 GB across 1 item(s)", output)
+        self.assertIn("Cleanable:    15.0 GB across 2 item(s)", output)
+        self.assertIn("Review only:  1.1 GB across 1 item(s)", output)
         self.assertIn("Quick wins\n----------", output)
         self.assertIn("mac-dev-clean clean --xcode-device-support --dry-run", output)
         self.assertIn("mac-dev-clean clean --browser-caches --dry-run", output)
