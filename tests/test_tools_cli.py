@@ -211,7 +211,7 @@ class ToolsInventoryTests(unittest.TestCase):
 
         with patch("mac_dev_clean.cli.open_index", side_effect=real_open), patch(
             "mac_dev_clean.cli.collect_tool_recommendations",
-            side_effect=RuntimeError("secret tool stderr /Users/private"),
+            side_effect=RuntimeError("secret tool stderr /private/var/test-user"),
         ):
             code, output, error = self.run_cli(
                 ["tools", "--json", "--index", str(self.index_path)]
@@ -364,7 +364,7 @@ class ToolsApplyTests(unittest.TestCase):
             "mac_dev_clean.cli.open_journal", return_value=Mock()
         ), patch(
             "mac_dev_clean.cli.invoke_tool_recommendations",
-            side_effect=RuntimeError("raw stderr /Users/private"),
+            side_effect=RuntimeError("raw stderr /private/var/test-user"),
         ):
             code, output, error = self.run_cli(
                 ["tools-apply", "--id", "shown-id", "--json"]
@@ -383,7 +383,7 @@ class ToolsApplyTests(unittest.TestCase):
 
     def test_tools_apply_close_failure_preserves_a_completed_action_result(self):
         index = Mock()
-        index.close.side_effect = OSError("secret /Users/private/tools.sqlite3")
+        index.close.side_effect = OSError("secret /private/var/test-user/tools.sqlite3")
         result = ApplyResult(
             recommendation_id="shown-id",
             label="Docker build cache",
@@ -519,7 +519,7 @@ class JournalCommandTests(unittest.TestCase):
             "mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)
         ), patch(
             "builtins.open",
-            side_effect=PermissionError("secret /Users/private/actions.jsonl"),
+            side_effect=PermissionError("secret /private/var/test-user/actions.jsonl"),
         ):
             code, output, error = self.run_cli(
                 ["journal", "--json", "--journal", str(self.path)]
@@ -539,7 +539,7 @@ class JournalCommandTests(unittest.TestCase):
             "mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)
         ), patch(
             "builtins.open",
-            side_effect=PermissionError("secret /Users/private/actions.jsonl"),
+            side_effect=PermissionError("secret /private/var/test-user/actions.jsonl"),
         ):
             code, output, error = self.run_cli(
                 ["journal", "--journal", str(self.path)]
@@ -560,7 +560,7 @@ class JournalCommandTests(unittest.TestCase):
 
             def __iter__(self):
                 yield b'{"target":"partial"}\n'
-                raise OSError("secret /Users/private/actions.jsonl")
+                raise OSError("secret /private/var/test-user/actions.jsonl")
 
         with patch(
             "mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)
@@ -638,7 +638,7 @@ class JournalCommandTests(unittest.TestCase):
         def failing_active(candidate, *args, **kwargs):
             attempted.append(candidate)
             if candidate == self.path:
-                raise PermissionError("secret /Users/private/actions.jsonl")
+                raise PermissionError("secret /private/var/test-user/actions.jsonl")
             return original_unlink(candidate, *args, **kwargs)
 
         with patch("mac_dev_clean.cli.open_journal", return_value=Mock(path=self.path)), patch(

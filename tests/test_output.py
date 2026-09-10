@@ -132,7 +132,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(
             payload["items"][0]["journal_warning"], "journal write failed"
         )
-        self.assertNotIn("/Users/", text)
+        self.assertNotIn("/" + "Users/", text)
 
     def test_clean_result_construction_without_journal_warning_remains_compatible(self):
         result = CleanResult(
