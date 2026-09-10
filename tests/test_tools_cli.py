@@ -453,9 +453,10 @@ class JournalCommandTests(unittest.TestCase):
             code = main(argv)
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_clear_attempts_active_and_rotated_journal(self):
+    def test_clear_attempts_active_and_actual_rotated_custom_journal(self):
+        self.path = Path(self.temp.name) / "custom.ndjson"
         self.path.write_text("active\n", encoding="utf-8")
-        rotated = self.path.with_name(self.path.name + ".1")
+        rotated = self.path.with_suffix(".jsonl.1")
         rotated.write_text("rotated\n", encoding="utf-8")
         journal = Mock(path=self.path)
         with patch("mac_dev_clean.cli.open_journal", return_value=journal) as opened:

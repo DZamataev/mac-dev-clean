@@ -16,15 +16,21 @@ MAX_JOURNAL_BYTES = 4 * 1024 * 1024
 ROTATED_SUFFIX = ".jsonl.1"
 
 
+def rotated_journal_path(path: Path) -> Path:
+    """Return the one retained rotation for any active journal path."""
+    return Path(path).with_suffix(ROTATED_SUFFIX)
+
+
 @dataclass(frozen=True)
 class JournalRecord:
     """One attempted action.
 
     `target` is a normalized filesystem path for path actions, or a tool
     resource identifier such as `docker:build-cache` for tool actions.
-    `argv` is empty for path actions and holds the exact executed vector for
-    tool actions, so the journal answers "what command ran?" without the
-    reader having to guess it from the detector id.
+    `argv` is empty for path actions and holds the preview or action vector
+    associated with a tool attempt. A refusal or unavailable tool can record the
+    requested vector before a process starts, so `outcome` and `detail` remain
+    authoritative about what happened.
     """
 
     recommendation_id: str
@@ -121,7 +127,7 @@ class ActionJournal:
             return None
         if size <= MAX_JOURNAL_BYTES:
             return None
-        rotated = self._path.with_suffix(ROTATED_SUFFIX)
+        rotated = rotated_journal_path(self._path)
         try:
             os.replace(str(self._path), str(rotated))
         except OSError as exc:

@@ -14,7 +14,7 @@ from .events import EventEmitter
 from .executor import ApplyOutcome, apply_recommendations
 from .fsevents import VolumeIdentity
 from .index import DEFAULT_TOOL_INDEX_PATH, open_index
-from .journal import open_journal
+from .journal import open_journal, rotated_journal_path
 from .output import (
     clean_report_json,
     render_clean_table,
@@ -659,7 +659,7 @@ def run_journal(args: argparse.Namespace) -> int:
     path = journal.path
     if args.clear:
         failed = False
-        for candidate in (path, path.with_name(path.name + ".1")):
+        for candidate in (path, rotated_journal_path(path)):
             try:
                 candidate.unlink()
             except FileNotFoundError:
