@@ -17,6 +17,8 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(human_bytes(1_000), "1.0 KB")
         self.assertEqual(human_bytes(799_800_000), "799.8 MB")
         self.assertEqual(human_bytes(1_000_000_000), "1.0 GB")
+        self.assertEqual(human_bytes(-1_000), "-1.0 KB")
+        self.assertEqual(human_bytes(-1_000_000), "-1.0 MB")
 
     def test_render_scan_table_suggests_top_cleanable_dry_runs(self):
         items = [

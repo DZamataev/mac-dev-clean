@@ -6,9 +6,9 @@ import Testing
     let json = #"""
     {
       "total_bytes": 1073741824,
-      "total": "1.0 GB",
+      "total": "1.1 GB",
       "cleanable_total_bytes": 1073741824,
-      "cleanable_total": "1.0 GB",
+      "cleanable_total": "1.1 GB",
       "report_only_total_bytes": 0,
       "report_only_total": "0 B",
       "count": 1,
@@ -17,7 +17,7 @@ import Testing
         "label": "Chrome model",
         "path": "/Users/test/Library/Caches/Chrome",
         "size_bytes": 1073741824,
-        "size": "1.0 GB",
+        "size": "1.1 GB",
         "modified_at": "2026-07-11T12:00:00+00:00",
         "cleanable": true,
         "delete_mode": "contents",
@@ -28,7 +28,7 @@ import Testing
 
     let report = try JSONDecoder().decode(ScanReport.self, from: Data(json.utf8))
 
-    #expect(report.cleanableTotal == "1.0 GB")
+    #expect(report.cleanableTotal == "1.1 GB")
     #expect(report.items.first?.category == "browser-cache")
     #expect(report.items.first?.cleanable == true)
 }
@@ -91,6 +91,8 @@ import Testing
 @Test func byteFormattingMatchesThePythonCLI() {
     #expect(ByteFormatter.string(699 * 1024 * 1024) == "733.0 MB")
     #expect(ByteFormatter.string(1024 * 1024 * 1024) == "1.1 GB")
+    #expect(ByteFormatter.string(-1_000) == "-1.0 KB")
+    #expect(ByteFormatter.string(-1_000_000) == "-1.0 MB")
 }
 
 @Test func diskSpaceFormatsFreeAndTotalCapacity() {
@@ -133,7 +135,7 @@ import Testing
     let json = #"""
     {
       "total_bytes": 104857600,
-      "total": "100.0 MB",
+      "total": "104.9 MB",
       "count": 2,
       "items": [
         {
@@ -141,7 +143,7 @@ import Testing
           "label": "Google browser caches",
           "path": "/Users/test/Library/Caches/Google",
           "size_bytes": 104857600,
-          "size": "100.0 MB",
+          "size": "104.9 MB",
           "removed": true,
           "error": ""
         },
@@ -150,7 +152,7 @@ import Testing
           "label": "npm download cache",
           "path": "/Users/test/.npm/_cacache",
           "size_bytes": 209715200,
-          "size": "200.0 MB",
+          "size": "209.7 MB",
           "removed": false,
           "error": "Operation not permitted"
         }

@@ -202,7 +202,7 @@ enum ByteFormatter {
         var value = Double(bytes)
         var unitIndex = 0
 
-        while value >= 1000, unitIndex < units.count - 1 {
+        while abs(value) >= 1000, unitIndex < units.count - 1 {
             value /= 1000
             unitIndex += 1
         }
