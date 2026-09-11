@@ -18,6 +18,8 @@ from .recommendation import (
     Recommendation,
     RestorationCost,
     ToolAction,
+    ToolUsage,
+    ToolUsageState,
     normalized_path,
 )
 
@@ -207,6 +209,7 @@ class ScanIndex:
 def _decode(payload: dict) -> Recommendation:
     raw_activity = payload.get("last_activity_at")
     raw_tool = payload.get("tool_action")
+    raw_usage = payload.get("tool_usage")
     tool_action = (
         ToolAction(
             tool=raw_tool["tool"],
@@ -216,6 +219,20 @@ def _decode(payload: dict) -> Recommendation:
             reported=raw_tool.get("reported", ""),
         )
         if raw_tool is not None
+        else None
+    )
+    tool_usage = (
+        ToolUsage(
+            state=ToolUsageState(raw_usage["state"]),
+            projects=raw_usage.get("projects", ()),
+            unpinned_projects=raw_usage.get("unpinned_projects", ()),
+            scan_completed_at=(
+                datetime.fromisoformat(raw_usage["scan_completed_at"])
+                if raw_usage.get("scan_completed_at")
+                else None
+            ),
+        )
+        if raw_usage is not None
         else None
     )
     return Recommendation(
@@ -237,6 +254,7 @@ def _decode(payload: dict) -> Recommendation:
         generation=int(payload["generation"]),
         last_activity_at=datetime.fromisoformat(raw_activity) if raw_activity else None,
         tool_action=tool_action,
+        tool_usage=tool_usage,
         warning=payload.get("warning", ""),
     )
 

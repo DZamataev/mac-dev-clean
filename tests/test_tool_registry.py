@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from mac_dev_clean.ndk_usage import NdkUsageSnapshot, ProjectNdkUsage
+from mac_dev_clean.recommendation import ToolUsageState
 from mac_dev_clean.tools.registry import binary_runner, collect_tool_recommendations
 from mac_dev_clean.tools.runner import MAX_STDERR_CHARS, ToolResult, ToolUnavailable
 from mac_dev_clean.tools.simulator import (
@@ -271,6 +274,43 @@ class CollectToolRecommendationsTests(unittest.TestCase):
         self.assertIn("docker-build-cache", detectors)
         self.assertIn("homebrew-cleanup", detectors)
         self.assertIn("simulator-unavailable-device", detectors)
+
+    def test_passes_ndk_usage_snapshot_only_to_android(self):
+        with tempfile.TemporaryDirectory() as raw:
+            sdk_root = Path(raw) / "sdk"
+            ndk = sdk_root / "ndk" / "27.0.12077973"
+            ndk.mkdir(parents=True)
+            (ndk / "blob").write_bytes(b"x")
+            runners = self.base_runners()
+            runners["sdkmanager"] = fixed(
+                """Installed packages:
+Path | Version | Description | Location
+ndk;27.0.12077973 | 27.0.1 | NDK | ndk/27.0.12077973
+"""
+            )
+            runners["avdmanager"] = fixed("")
+            snapshot = NdkUsageSnapshot(
+                completed_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+                usages=(
+                    ProjectNdkUsage(
+                        Path("/Users/test/app"), "27.0.12077973", ("pin",)
+                    ),
+                ),
+            )
+
+            report = collect_tool_recommendations(
+                generation=5,
+                home=HOME,
+                env={"ANDROID_HOME": str(sdk_root)},
+                runners=runners,
+                ndk_usage_snapshot=snapshot,
+            )
+
+        item = next(
+            item for item in report.recommendations if item.detector_id == "android-ndk"
+        )
+        self.assertIs(item.tool_usage.state, ToolUsageState.MATCHED)
+        self.assertEqual(item.tool_usage.projects, ("/Users/test/app",))
 
     def test_one_unavailable_or_malformed_tool_does_not_suppress_others(self):
         runners = self.base_runners()

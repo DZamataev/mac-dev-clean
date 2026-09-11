@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
+from ..ndk_usage import NdkUsageSnapshot
 from ..recommendation import (
     ActionKind,
     Confidence,
@@ -11,6 +12,8 @@ from ..recommendation import (
     Recommendation,
     RestorationCost,
     ToolAction,
+    ToolUsage,
+    ToolUsageState,
     normalized_path,
 )
 from ..scanner import path_size
@@ -223,6 +226,7 @@ def analyze_android(
     avd_runner: ToolRunner,
     generation: int,
     sdk_root: Optional[Path],
+    ndk_usage_snapshot: Optional[NdkUsageSnapshot] = None,
 ) -> Tuple[List[Recommendation], Optional[str]]:
     """Inventory Android resources without selecting any removal by default."""
     if sdk_root is None:
@@ -234,6 +238,15 @@ def analyze_android(
 
     items = []  # type: List[Recommendation]
     problems = []  # type: List[str]
+    exact_projects = {}  # type: Dict[str, Set[str]]
+    unpinned_projects = set()  # type: Set[str]
+    if ndk_usage_snapshot is not None:
+        for usage in ndk_usage_snapshot.usages:
+            project_path = normalized_path(usage.project_path)
+            if usage.version is None:
+                unpinned_projects.add(project_path)
+            else:
+                exact_projects.setdefault(usage.version, set()).add(project_path)
     try:
         sdk_result = sdk_runner(SDK_LIST_ARGV)
     except ToolUnavailable as exc:
@@ -285,6 +298,22 @@ def analyze_android(
                 identity = package_segments[1]
             elif package_segments[0] == "system-images":
                 identity = ";".join(package_segments[1:])
+            tool_usage = None  # type: Optional[ToolUsage]
+            if len(package_segments) == 2 and package_segments[0] == "ndk":
+                if ndk_usage_snapshot is None:
+                    tool_usage = ToolUsage(state=ToolUsageState.UNKNOWN)
+                else:
+                    projects = tuple(exact_projects.get(package_segments[1], set()))
+                    tool_usage = ToolUsage(
+                        state=(
+                            ToolUsageState.MATCHED
+                            if projects
+                            else ToolUsageState.UNREFERENCED
+                        ),
+                        projects=projects,
+                        unpinned_projects=tuple(unpinned_projects),
+                        scan_completed_at=ndk_usage_snapshot.completed_at,
+                    )
             items.append(
                 Recommendation(
                     detector_id=detector_id,
@@ -317,6 +346,7 @@ def analyze_android(
                         preview_argv=SDK_LIST_ARGV,
                         reported=package.version,
                     ),
+                    tool_usage=tool_usage,
                 )
             )
         items.sort(

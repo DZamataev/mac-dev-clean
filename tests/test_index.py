@@ -18,6 +18,8 @@ from mac_dev_clean.recommendation import (
     Evidence,
     Recommendation,
     RestorationCost,
+    ToolUsage,
+    ToolUsageState,
 )
 
 
@@ -425,6 +427,59 @@ class ScanIndexTests(unittest.TestCase):
 
 
 class ToolRecommendationRoundTripTests(unittest.TestCase):
+    def test_tool_usage_normalizes_to_a_stable_json_shape(self):
+        usage = ToolUsage(
+            state=ToolUsageState.MATCHED,
+            projects=(
+                "/Users/test/app-b",
+                "/Users/test/other/../app-a",
+                "/Users/test/app-b",
+            ),
+            unpinned_projects=(
+                "/Users/test/app-c/.",
+                "/Users/test/app-c",
+            ),
+            scan_completed_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            usage.to_dict(),
+            {
+                "state": "matched",
+                "projects": ["/Users/test/app-a", "/Users/test/app-b"],
+                "unpinned_projects": ["/Users/test/app-c"],
+                "scan_completed_at": "2026-09-11T00:00:00+00:00",
+            },
+        )
+
+    def test_tool_usage_rejects_state_invariant_violations(self):
+        completed_at = datetime(2026, 9, 11, tzinfo=timezone.utc)
+        cases = (
+            (
+                ToolUsageState.MATCHED,
+                {"projects": (), "scan_completed_at": completed_at},
+            ),
+            (
+                ToolUsageState.UNREFERENCED,
+                {
+                    "projects": ("/Users/test/app",),
+                    "scan_completed_at": completed_at,
+                },
+            ),
+            (
+                ToolUsageState.UNKNOWN,
+                {"projects": ("/Users/test/app",), "scan_completed_at": None},
+            ),
+            (
+                ToolUsageState.UNKNOWN,
+                {"projects": (), "scan_completed_at": completed_at},
+            ),
+        )
+        for state, keyword_arguments in cases:
+            with self.subTest(state=state, arguments=keyword_arguments):
+                with self.assertRaises(ValueError):
+                    ToolUsage(state=state, **keyword_arguments)
+
     def load_tool_payload(self, mutate):
         from mac_dev_clean.recommendation import ToolAction
 
@@ -523,6 +578,12 @@ class ToolRecommendationRoundTripTests(unittest.TestCase):
                 ),
                 reported="7.499GB",
             ),
+            tool_usage=ToolUsage(
+                state=ToolUsageState.MATCHED,
+                projects=("/Users/test/app",),
+                unpinned_projects=("/Users/test/unpinned",),
+                scan_completed_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+            ),
         )
         index.record_recommendation(item)
         index.complete_generation()
@@ -531,6 +592,27 @@ class ToolRecommendationRoundTripTests(unittest.TestCase):
 
         self.assertIsNotNone(loaded.tool_action)
         self.assertEqual(loaded.tool_action, item.tool_action)
+        self.assertEqual(loaded.tool_usage, item.tool_usage)
+
+    def test_existing_path_recommendation_without_tool_usage_key_decodes(self):
+        loaded = self.load_path_payload(lambda payload: payload.pop("tool_usage"))
+
+        self.assertIsNotNone(loaded)
+        self.assertIsNone(loaded.tool_usage)
+
+    def test_non_tool_recommendation_rejects_tool_usage(self):
+        item = build_recommendation(1)
+
+        with self.assertRaisesRegex(ValueError, "only invoke_tool"):
+            Recommendation(
+                **{
+                    **item.__dict__,
+                    "tool_usage": ToolUsage(
+                        state=ToolUsageState.UNKNOWN,
+                        unpinned_projects=("/Users/test/app",),
+                    ),
+                }
+            )
 
     def test_existing_path_recommendation_without_tool_action_key_decodes(self):
         temp = TemporaryDirectory()

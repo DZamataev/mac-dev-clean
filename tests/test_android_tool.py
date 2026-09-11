@@ -3,9 +3,16 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from mac_dev_clean.recommendation import ActionKind, Confidence, RestorationCost
+from mac_dev_clean.ndk_usage import NdkUsageSnapshot, ProjectNdkUsage
+from mac_dev_clean.recommendation import (
+    ActionKind,
+    Confidence,
+    RestorationCost,
+    ToolUsageState,
+)
 from mac_dev_clean.scanner import path_size
 from mac_dev_clean.tools.android import (
     Avd,
@@ -260,6 +267,125 @@ class FindSdkRootTests(unittest.TestCase):
 
 
 class AnalyzeAndroidTests(unittest.TestCase):
+    def test_ndk_usage_matches_exact_resource_version_not_display_revision(self):
+        sdk_output = """Installed packages:
+Path | Version | Description | Location
+ndk;27.0.12077973 | 27.0.1 | NDK | ndk/27.0.12077973
+cmake;3.31.6 | 3.31.6 | CMake | cmake/3.31.6
+"""
+
+        def runner(argv):
+            stdout = sdk_output if argv[0] == "sdkmanager" else ""
+            return ToolResult(tuple(argv), stdout, "", 0)
+
+        completed_at = datetime(2026, 9, 11, tzinfo=timezone.utc)
+        snapshot = NdkUsageSnapshot(
+            completed_at=completed_at,
+            usages=(
+                ProjectNdkUsage(Path("/Users/test/app-b"), "27.0.12077973", ()),
+                ProjectNdkUsage(
+                    Path("/Users/test/other/../app-a"), "27.0.12077973", ()
+                ),
+                ProjectNdkUsage(Path("/Users/test/app-b"), "27.0.12077973", ()),
+                ProjectNdkUsage(Path("/Users/test/other-version"), "27.0.1", ()),
+                ProjectNdkUsage(Path("/Users/test/unpinned"), None, ()),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            sdk = Path(raw_tmp)
+            for relative in ("ndk/27.0.12077973", "cmake/3.31.6"):
+                location = sdk / relative
+                location.mkdir(parents=True)
+                (location / "blob").write_bytes(b"x")
+
+            items, unavailable = analyze_android(
+                runner, runner, 1, sdk, ndk_usage_snapshot=snapshot
+            )
+
+        self.assertIsNone(unavailable)
+        ndk = next(item for item in items if item.detector_id == "android-ndk")
+        self.assertEqual(ndk.label, "Android NDK 27.0.1")
+        self.assertIsNotNone(ndk.tool_usage)
+        self.assertIs(ndk.tool_usage.state, ToolUsageState.MATCHED)
+        self.assertEqual(
+            ndk.tool_usage.projects,
+            ("/Users/test/app-a", "/Users/test/app-b"),
+        )
+        self.assertEqual(ndk.tool_usage.unpinned_projects, ("/Users/test/unpinned",))
+        self.assertEqual(ndk.tool_usage.scan_completed_at, completed_at)
+        cmake = next(item for item in items if item.detector_id == "android-cmake")
+        self.assertIsNone(cmake.tool_usage)
+
+    def test_ndk_usage_distinguishes_unreferenced_from_unknown(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            sdk = root / "sdk"
+            avd = root / "Keep.avd"
+            rows = (
+                ("ndk;27.0.12077973", "ndk/27.0.12077973"),
+                ("cmake;3.31.6", "cmake/3.31.6"),
+                ("platforms;android-35", "platforms/android-35"),
+                (
+                    "system-images;android-35;x",
+                    "system-images/android-35/x",
+                ),
+            )
+            for _, relative in rows:
+                location = sdk / relative
+                location.mkdir(parents=True)
+                (location / "blob").write_bytes(b"x")
+            avd.mkdir()
+            sdk_output = "Installed packages:\nPath | Version | Description | Location\n"
+            sdk_output += "\n".join(
+                "{} | display | package | {}".format(resource, location)
+                for resource, location in rows
+            )
+            avd_output = "Available Android Virtual Devices:\nName: Keep\nPath: {}".format(
+                avd
+            )
+
+            def runner(argv):
+                stdout = sdk_output if argv[0] == "sdkmanager" else avd_output
+                return ToolResult(tuple(argv), stdout, "", 0)
+
+            completed_at = datetime(2026, 9, 11, tzinfo=timezone.utc)
+            snapshot = NdkUsageSnapshot(
+                completed_at=completed_at,
+                usages=(
+                    ProjectNdkUsage(Path("/Users/test/other"), "26.1", ()),
+                    ProjectNdkUsage(Path("/Users/test/unpinned"), None, ()),
+                ),
+            )
+            complete_items, _ = analyze_android(
+                runner, runner, 1, sdk, ndk_usage_snapshot=snapshot
+            )
+            unknown_items, _ = analyze_android(runner, runner, 1, sdk)
+
+        complete_ndk = next(
+            item for item in complete_items if item.detector_id == "android-ndk"
+        )
+        self.assertIs(complete_ndk.tool_usage.state, ToolUsageState.UNREFERENCED)
+        self.assertEqual(complete_ndk.tool_usage.projects, ())
+        self.assertEqual(
+            complete_ndk.tool_usage.unpinned_projects, ("/Users/test/unpinned",)
+        )
+        self.assertEqual(complete_ndk.tool_usage.scan_completed_at, completed_at)
+
+        unknown_ndk = next(
+            item for item in unknown_items if item.detector_id == "android-ndk"
+        )
+        self.assertIs(unknown_ndk.tool_usage.state, ToolUsageState.UNKNOWN)
+        self.assertEqual(unknown_ndk.tool_usage.projects, ())
+        self.assertEqual(unknown_ndk.tool_usage.unpinned_projects, ())
+        self.assertIsNone(unknown_ndk.tool_usage.scan_completed_at)
+        self.assertTrue(
+            all(
+                item.tool_usage is None
+                for item in complete_items
+                if item.detector_id != "android-ndk"
+            )
+        )
+
     def test_missing_sdk_root_returns_unavailable_without_inventory_calls(self):
         def runner(argv):
             self.fail("inventory must not run without an SDK root")

@@ -121,6 +121,55 @@ def recommendation_id(detector_id: str, path: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+class ToolUsageState(Enum):
+    MATCHED = "matched"
+    UNREFERENCED = "unreferenced"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ToolUsage:
+    state: ToolUsageState
+    projects: Tuple[str, ...] = ()
+    unpinned_projects: Tuple[str, ...] = ()
+    scan_completed_at: Optional[datetime] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "projects",
+            tuple(sorted({normalized_path(Path(path)) for path in self.projects})),
+        )
+        object.__setattr__(
+            self,
+            "unpinned_projects",
+            tuple(
+                sorted(
+                    {normalized_path(Path(path)) for path in self.unpinned_projects}
+                )
+            ),
+        )
+        if self.state is ToolUsageState.MATCHED and not self.projects:
+            raise ValueError("matched tool usage requires projects")
+        if (
+            self.state in (ToolUsageState.UNREFERENCED, ToolUsageState.UNKNOWN)
+            and self.projects
+        ):
+            raise ValueError("unreferenced and unknown tool usage require empty projects")
+        if self.state is ToolUsageState.UNKNOWN and self.scan_completed_at is not None:
+            raise ValueError("unknown tool usage requires no completion time")
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "state": self.state.value,
+            "projects": list(self.projects),
+            "unpinned_projects": list(self.unpinned_projects),
+            "scan_completed_at": self.scan_completed_at.astimezone(timezone.utc).isoformat()
+            if self.scan_completed_at
+            else None,
+        }
+
+
 @dataclass(frozen=True)
 class Recommendation:
     detector_id: str
@@ -140,12 +189,15 @@ class Recommendation:
     last_activity_at: Optional[datetime] = None
     warning: str = ""
     tool_action: Optional[ToolAction] = None
+    tool_usage: Optional[ToolUsage] = None
 
     def __post_init__(self) -> None:
         if self.action is ActionKind.INVOKE_TOOL and self.tool_action is None:
             raise ValueError("invoke_tool recommendations require a tool_action")
         if self.action is not ActionKind.INVOKE_TOOL and self.tool_action is not None:
             raise ValueError("only invoke_tool recommendations accept a tool_action")
+        if self.action is not ActionKind.INVOKE_TOOL and self.tool_usage is not None:
+            raise ValueError("only invoke_tool recommendations accept tool_usage")
         eligible = (
             self.action in DESTRUCTIVE_ACTIONS
             and self.confidence is not Confidence.UNKNOWN
@@ -180,4 +232,5 @@ class Recommendation:
             if self.last_activity_at
             else None,
             "tool_action": self.tool_action.to_dict() if self.tool_action else None,
+            "tool_usage": self.tool_usage.to_dict() if self.tool_usage else None,
         }

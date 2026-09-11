@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from ..ndk_usage import NdkUsageSnapshot
 from ..recommendation import Recommendation
 from ..sim_prune import SimctlError
 from .android import analyze_android, cmdline_tool_dirs, find_sdk_root
@@ -177,6 +178,7 @@ def collect_tool_recommendations(
     home: Path,
     env: Optional[Dict[str, str]] = None,
     runners: Optional[Dict[str, ToolRunner]] = None,
+    ndk_usage_snapshot: Optional[NdkUsageSnapshot] = None,
 ) -> ToolReport:
     """Collect every tool independently without starting or installing it."""
     environment = dict(os.environ) if env is None else dict(env)
@@ -212,6 +214,7 @@ def collect_tool_recommendations(
                 avd_runner=runner_for("avdmanager", android_dirs),
                 generation=generation,
                 sdk_root=sdk_root,
+                ndk_usage_snapshot=ndk_usage_snapshot,
             ),
         ),
         (
