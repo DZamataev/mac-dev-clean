@@ -3,6 +3,66 @@ import Foundation
 import Testing
 @testable import MacDevCleanApp
 
+@Test func tabScanLaunchPolicyKeepsDeepAndToolsManualOnly() {
+    #expect(SidebarPage.cleanup.startsScanOnFocus)
+    #expect(!SidebarPage.deepScan.startsScanOnFocus)
+    #expect(!SidebarPage.tools.startsScanOnFocus)
+    #expect(!SidebarPage.review.startsScanOnFocus)
+    #expect(!SidebarPage.about.startsScanOnFocus)
+}
+
+@Test func nilSidebarSelectionUsesCleanupLifecyclePolicy() {
+    let page = SidebarPage.resolved(nil)
+
+    #expect(page == .cleanup)
+    #expect(page.startsScanOnFocus)
+    #expect(page.showsScanActivityIndicator(for: .scanning))
+    #expect(!page.showsScanActivityIndicator(for: .cleaning))
+}
+
+@Test func sidebarActivityIndicatorIsScopedToTheSelectedTabsScan() {
+    let expected: [SidebarPage: AppModel.Activity?] = [
+        .cleanup: .scanning,
+        .deepScan: .deepScanning,
+        .tools: .loadingTools,
+        .review: .scanning,
+        .about: nil,
+    ]
+
+    for page in SidebarPage.allCases {
+        for activity in AppModel.Activity.allCases {
+            #expect(
+                page.showsScanActivityIndicator(for: activity) == (expected[page] == activity),
+                "Unexpected sidebar indicator for \(page.rawValue) during \(activity)"
+            )
+        }
+    }
+}
+
+@Test func primaryScanPlaceholderNeverMisattributesOtherWork() {
+    for page in SidebarPage.allCases {
+        for activity in AppModel.Activity.allCases {
+            for hasReport in [false, true] {
+                let expected = !hasReport
+                    && (page == .cleanup || page == .review)
+                    && activity == .scanning
+                #expect(
+                    page.showsPrimaryScanPlaceholder(for: activity, hasReport: hasReport) == expected,
+                    "Unexpected primary placeholder for \(page.rawValue), \(activity), report=\(hasReport)"
+                )
+            }
+        }
+    }
+}
+
+@Test func toolScanActivityIndicatorOnlyTracksToolInventory() {
+    #expect(AppModel.Activity.loadingTools.showsToolScanIndicator)
+    #expect(!AppModel.Activity.applyingTool.showsToolScanIndicator)
+    #expect(!AppModel.Activity.deepScanning.showsToolScanIndicator)
+    #expect(!AppModel.Activity.scanning.showsToolScanIndicator)
+    #expect(!AppModel.Activity.idle.showsToolScanIndicator)
+}
+
 @Test func toolReportDecodesStatusesAndRecommendations() throws {
     let json = #"""
     {
@@ -330,9 +390,6 @@ import Testing
 @Test func toolManagedPageAndCommandPreviewAreExplicit() {
     #expect(SidebarPage.tools.rawValue == "Tool-managed")
     #expect(SidebarPage.tools.symbol == "wrench.and.screwdriver")
-    #expect(SidebarPage.cleanup.showsPrimaryScanProgress)
-    #expect(SidebarPage.review.showsPrimaryScanProgress)
-    #expect(!SidebarPage.tools.showsPrimaryScanProgress)
 
     let action = ToolActionPayload(
         tool: "docker",
@@ -382,6 +439,26 @@ import Testing
     #expect(throws: BackendError.self) {
         try CleanupBackend.toolApplyReport(from: inconsistent, requestedID: "persisted-id")
     }
+}
+
+@MainActor
+@Test func toolScanActionStartsAsManualScanThenBecomesRefresh() async {
+    let state = StubToolBackendState(
+        reports: [toolReport(recommendations: [])],
+        applyReport: invokedToolReport()
+    )
+    let model = AppModel(
+        backend: ToolsEmptyCleanupBackend(),
+        toolBackend: StubToolBackend(state: state)
+    )
+
+    #expect(model.toolScanButtonTitle == "Scan Tools")
+    #expect(await state.loadCount == 0)
+
+    await model.loadTools()
+
+    #expect(model.toolScanButtonTitle == "Refresh Tools")
+    #expect(await state.loadCount == 1)
 }
 
 @MainActor
@@ -439,6 +516,46 @@ import Testing
     #expect(model.toolReport?.recommendations.isEmpty == true)
     #expect(model.noticeMessage?.contains("Docker build cache") == true)
     #expect(model.activity == .idle)
+}
+
+@MainActor
+@Test func authoritativeToolRefusalDoesNotRefreshInventory() async {
+    let failed = ToolApplyReport(
+        results: [
+            ToolApplyResult(
+                id: "persisted-id",
+                label: "Docker build cache",
+                path: "docker:build-cache",
+                reclaimableBytes: 10,
+                size: "10 B",
+                outcome: "failed",
+                dryRun: false,
+                error: "owner tool refused",
+                reported: "",
+                journalWarning: ""
+            ),
+        ],
+        warning: nil
+    )
+    let state = StubToolBackendState(
+        reports: [
+            toolReport(recommendations: [toolRecommendation()]),
+            toolReport(recommendations: []),
+        ],
+        applyReport: failed
+    )
+    let model = AppModel(
+        backend: ToolsEmptyCleanupBackend(),
+        toolBackend: StubToolBackend(state: state)
+    )
+
+    await model.loadTools()
+    await model.applyTool(id: "persisted-id")
+
+    #expect(await state.appliedIds == ["persisted-id"])
+    #expect(await state.loadCount == 1)
+    #expect(model.toolReport?.recommendations.map(\.id) == ["persisted-id"])
+    #expect(model.warningMessage?.contains("owner tool refused") == true)
 }
 
 @MainActor

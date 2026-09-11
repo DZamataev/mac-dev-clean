@@ -2,6 +2,14 @@ import Foundation
 import Testing
 @testable import MacDevCleanApp
 
+@Test func deepScanActivityIndicatorOnlyTracksProjectAnalysis() {
+    #expect(AppModel.Activity.deepScanning.showsDeepScanIndicator)
+    #expect(!AppModel.Activity.applying.showsDeepScanIndicator)
+    #expect(!AppModel.Activity.loadingTools.showsDeepScanIndicator)
+    #expect(!AppModel.Activity.scanning.showsDeepScanIndicator)
+    #expect(!AppModel.Activity.idle.showsDeepScanIndicator)
+}
+
 @Test func parserDecodesACandidateEvent() throws {
     let line = #"""
     {"protocol_version":1,"generation":3,"event":"candidate_found","recommendation":{"id":"abc123","detector_id":"node-modules","category":"project-dependencies","label":"node_modules","path":"/Users/test/app/node_modules","action":"delete_tree","allocated_bytes":2048,"reclaimable_bytes":2048,"size":"2.0 KB","confidence":"strong","restoration":"redownload","selected_by_default":true,"evidence":[{"code":"lock-file","detail":"pnpm-lock.yaml exists"}],"safety_root":"/Users/test/app","reason":"Project has not changed in 143 days.","warning":"Close Xcode","generation":3,"last_activity_at":null}}

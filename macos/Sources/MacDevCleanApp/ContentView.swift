@@ -18,10 +18,28 @@ enum SidebarPage: String, CaseIterable, Identifiable {
         }
     }
 
-    var showsPrimaryScanProgress: Bool {
+    static func resolved(_ page: SidebarPage?) -> SidebarPage { page ?? .cleanup }
+
+    var startsScanOnFocus: Bool { self == .cleanup }
+
+    func showsScanActivityIndicator(for activity: AppModel.Activity) -> Bool {
         switch self {
         case .cleanup, .review:
-            true
+            activity == .scanning
+        case .deepScan:
+            activity.showsDeepScanIndicator
+        case .tools:
+            activity.showsToolScanIndicator
+        case .about:
+            false
+        }
+    }
+
+    func showsPrimaryScanPlaceholder(for activity: AppModel.Activity, hasReport: Bool) -> Bool {
+        guard !hasReport else { return false }
+        return switch self {
+        case .cleanup, .review:
+            showsScanActivityIndicator(for: activity)
         case .tools, .deepScan, .about:
             false
         }
@@ -32,6 +50,8 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var page: SidebarPage? = .cleanup
     @State private var showsConfirmation = false
+
+    private var selectedPage: SidebarPage { SidebarPage.resolved(page) }
 
     var body: some View {
         NavigationSplitView {
@@ -45,9 +65,9 @@ struct ContentView: View {
             }
         } detail: {
             Group {
-                if page == .about {
+                if selectedPage == .about {
                     AboutView()
-                } else if page == .deepScan {
+                } else if selectedPage == .deepScan {
                     VStack(spacing: 0) {
                         header
                         Divider()
@@ -66,15 +86,19 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 640)
         .toolbar {
             ToolbarItemGroup {
-                if page == .tools {
+                if selectedPage == .tools {
                     Button {
                         Task { await model.loadTools() }
                     } label: {
-                        Label("Refresh Tools", systemImage: "arrow.clockwise")
+                        Label(model.toolScanButtonTitle, systemImage: "arrow.clockwise")
                     }
                     .disabled(model.isBusy)
-                    .help("Refresh tool-managed storage")
-                } else if page != .about && page != .deepScan {
+                    .help(
+                        model.toolReport == nil
+                            ? "Scan tool-managed storage"
+                            : "Refresh tool-managed storage"
+                    )
+                } else if selectedPage != .about && selectedPage != .deepScan {
                     Button {
                         Task { await model.scan() }
                     } label: {
@@ -83,7 +107,7 @@ struct ContentView: View {
                     .disabled(model.isBusy)
                     .help("Scan developer storage again")
 
-                    if page == .cleanup {
+                    if selectedPage == .cleanup {
                         Button("Select All") { model.selectAll() }
                             .disabled(model.isBusy || model.groups.isEmpty)
                             .help("Select every cleanable category")
@@ -115,14 +139,18 @@ struct ContentView: View {
         } message: {
             Text("This will remove \(model.selectedSummary). Generated caches may be downloaded or rebuilt later.")
         }
-        .task { await model.scanIfNeeded() }
+        .task(id: selectedPage) {
+            guard selectedPage.startsScanOnFocus else { return }
+            await model.scanIfNeeded()
+        }
     }
 
     private var sidebarFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if model.isBusy {
+            if selectedPage.showsScanActivityIndicator(for: model.activity) {
                 ProgressView()
                     .controlSize(.small)
+                    .accessibilityLabel("Scanning current tab")
             }
             Text(model.activity.message)
                 .font(.caption)
@@ -210,19 +238,22 @@ struct ContentView: View {
 
     @ViewBuilder
     private var content: some View {
-        if page?.showsPrimaryScanProgress == true && model.report == nil && model.isBusy {
+        if selectedPage.showsPrimaryScanPlaceholder(
+            for: model.activity,
+            hasReport: model.report != nil
+        ) {
             ContentUnavailableView {
                 Label("Scanning", systemImage: "internaldrive")
             } description: {
                 Text("Measuring developer caches and review-only storage…")
             }
         } else {
-            switch page {
+            switch selectedPage {
             case .review:
                 ReviewOnlyView()
             case .tools:
                 ToolManagedView()
-            case .cleanup, .none:
+            case .cleanup:
                 CleanupGroupsView()
             case .deepScan, .about:
                 EmptyView()
@@ -411,7 +442,6 @@ struct LocationRow: View {
 struct ToolManagedView: View {
     @EnvironmentObject private var model: AppModel
     @State private var pendingRecommendation: ToolRecommendation?
-    @State private var hasRequestedInitialLoad = false
 
     var body: some View {
         ScrollView {
@@ -421,11 +451,12 @@ struct ToolManagedView: View {
                 if let report = model.toolReport {
                     statuses(report.statuses)
                     recommendations(report.recommendations)
-                } else if model.activity == .loadingTools {
+                } else if model.activity.showsToolScanIndicator {
                     HStack(spacing: 10) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Checking Docker, Homebrew, Android, and Simulator storage…")
+                            .accessibilityLabel("Scanning tool-managed storage")
+                        Text(model.activity.message)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, minHeight: 120)
@@ -433,17 +464,12 @@ struct ToolManagedView: View {
                     ContentUnavailableView(
                         "Tool Inventory Not Loaded",
                         systemImage: "wrench.and.screwdriver",
-                        description: Text("Use Refresh Tools to inspect storage through each tool's own CLI.")
+                        description: Text("Use Scan Tools to inspect storage through each tool's own CLI.")
                     )
                     .padding(.top, 50)
                 }
             }
             .padding(20)
-        }
-        .task { await requestInitialLoadWhenIdle() }
-        .onChange(of: model.activity) { _, activity in
-            guard activity == .idle else { return }
-            Task { await requestInitialLoadWhenIdle() }
         }
         .confirmationDialog(
             "Run tool-managed cleanup?",
@@ -565,12 +591,6 @@ struct ToolManagedView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.secondary.opacity(0.15))
         }
-    }
-
-    private func requestInitialLoadWhenIdle() async {
-        guard !hasRequestedInitialLoad, !model.isBusy else { return }
-        hasRequestedInitialLoad = true
-        await model.loadToolsIfNeeded()
     }
 }
 
@@ -745,14 +765,22 @@ struct DeepScanView: View {
                     .font(.callout.monospacedDigit())
             }
 
-            if model.deepScanState.isRunning {
-                ProgressView()
-                    .controlSize(.small)
-                Text(model.deepScanState.currentPath)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+            if model.activity.showsDeepScanIndicator {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Scanning projects")
+                    Text(model.activity.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if !model.deepScanState.currentPath.isEmpty {
+                    Text(model.deepScanState.currentPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
 
             if model.deepScanState.wasCancelled {

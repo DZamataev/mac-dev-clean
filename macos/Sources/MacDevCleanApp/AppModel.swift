@@ -4,7 +4,7 @@ import SwiftUI
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum Activity: Equatable {
+    enum Activity: Equatable, CaseIterable {
         case idle
         case scanning
         case cleaning
@@ -12,6 +12,20 @@ final class AppModel: ObservableObject {
         case applying
         case loadingTools
         case applyingTool
+
+        var showsDeepScanIndicator: Bool {
+            switch self {
+            case .deepScanning: true
+            case .idle, .scanning, .cleaning, .applying, .loadingTools, .applyingTool: false
+            }
+        }
+
+        var showsToolScanIndicator: Bool {
+            switch self {
+            case .loadingTools: true
+            case .idle, .scanning, .cleaning, .deepScanning, .applying, .applyingTool: false
+            }
+        }
 
         var message: String {
             switch self {
@@ -98,6 +112,7 @@ final class AppModel: ObservableObject {
     }
 
     var isBusy: Bool { activity != .idle }
+    var toolScanButtonTitle: String { toolReport == nil ? "Scan Tools" : "Refresh Tools" }
 
     func scanIfNeeded() async {
         guard report == nil else { return }
@@ -147,11 +162,6 @@ final class AppModel: ObservableObject {
         }
         refreshDiskSpace()
         activity = .idle
-    }
-
-    func loadToolsIfNeeded() async {
-        guard toolReport == nil else { return }
-        await loadTools()
     }
 
     func loadTools() async {
@@ -206,6 +216,7 @@ final class AppModel: ObservableObject {
             guard let result = report.results.first(where: { $0.id == recommendation.id }) else {
                 throw BackendError.invalidOutput("Tool cleanup returned a mismatched result.")
             }
+            requiresRefresh = false
             let warnings = [result.journalWarning, report.warning ?? ""].filter { !$0.isEmpty }
             let resultLabel = result.label.trimmingCharacters(in: .whitespacesAndNewlines)
             let reviewedLabel = recommendation.label.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -221,7 +232,6 @@ final class AppModel: ObservableObject {
                         reclaimableTotalBytes: remaining.reduce(0) { $0 + $1.reclaimableBytes }
                     )
                 }
-                requiresRefresh = false
             }
             if result.succeeded, warnings.isEmpty {
                 let reported = result.reported.isEmpty ? result.size : result.reported

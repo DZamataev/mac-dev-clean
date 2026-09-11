@@ -449,14 +449,18 @@ class BrewInvocationTests(unittest.TestCase):
         self.assertNotIn(("brew", "cleanup"), runner.calls)
 
 
-def build_tool_item(action: ToolAction, generation: int = 1) -> Recommendation:
+def build_tool_item(
+    action: ToolAction,
+    generation: int = 1,
+    detector_id: str = "contract-probe",
+) -> Recommendation:
     """Wrap an arbitrary tool action in an otherwise ordinary recommendation.
 
     The recommendation is deliberately well formed everywhere else, so a
     refusal can only be attributable to the action itself.
     """
     return Recommendation(
-        detector_id="contract-probe",
+        detector_id=detector_id,
         category="tool-managed",
         label="Contract probe",
         path=HOME,
@@ -507,14 +511,19 @@ class ContractRefusalTests(unittest.TestCase):
         text = self.journal_path.read_text(encoding="utf-8")
         return [json.loads(line) for line in text.splitlines()]
 
-    def run_action(self, action: ToolAction, responses=None):
+    def run_action(
+        self,
+        action: ToolAction,
+        responses=None,
+        detector_id: str = "contract-probe",
+    ):
         self.sequence += 1
         index = open_index(
             Path(self.tmp.name) / "index{}.sqlite3".format(self.sequence)
         )
         self.addCleanup(index.close)
         index.begin_generation(VolumeIdentity(device=1, uuid="U"), event_id=1)
-        item = build_tool_item(action)
+        item = build_tool_item(action, detector_id=detector_id)
         index.record_recommendation(item)
         index.complete_generation()
         # Keyed by the action's own tool so a refusal can never fall through to
@@ -526,8 +535,12 @@ class ContractRefusalTests(unittest.TestCase):
         )
         return results[0], runner
 
-    def assertRefused(self, action: ToolAction) -> None:
-        result, runner = self.run_action(action)
+    def assertRefused(
+        self,
+        action: ToolAction,
+        detector_id: str = "contract-probe",
+    ) -> ApplyResult:
+        result, runner = self.run_action(action, detector_id=detector_id)
 
         self.assertEqual(result.outcome, ApplyOutcome.FAILED)
         self.assertEqual(runner.calls, [])
@@ -536,6 +549,7 @@ class ContractRefusalTests(unittest.TestCase):
         self.assertEqual(record["argv"], list(action.preview_argv))
         self.assertTrue(record["detail"])
         self.assertLessEqual(len(record["detail"]), 4000)
+        return result
 
     def test_an_unknown_tool_is_refused_before_any_runner_call(self):
         self.assertRefused(
@@ -614,7 +628,8 @@ class ContractRefusalTests(unittest.TestCase):
                 resource="AAAAAAAA-1111-2222-3333-444444444444",
                 argv=(XCRUN, "simctl", "delete", "BBBBBBBB-1111-2222-3333-444444444444"),
                 preview_argv=(XCRUN, "simctl", "list", "--json", "devices"),
-            )
+            ),
+            detector_id="simulator-unavailable-device",
         )
 
     def test_a_device_action_paired_with_the_runtimes_preview_is_refused(self):
@@ -627,7 +642,8 @@ class ContractRefusalTests(unittest.TestCase):
                 resource="AAAAAAAA-1111-2222-3333-444444444444",
                 argv=(XCRUN, "simctl", "delete", "AAAAAAAA-1111-2222-3333-444444444444"),
                 preview_argv=(XCRUN, "simctl", "runtime", "list", "-j"),
-            )
+            ),
+            detector_id="simulator-unavailable-device",
         )
 
     def test_a_runtime_action_paired_with_the_devices_preview_is_refused(self):
@@ -643,8 +659,23 @@ class ContractRefusalTests(unittest.TestCase):
                     "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
                 ),
                 preview_argv=(XCRUN, "simctl", "list", "--json", "devices"),
-            )
+            ),
+            detector_id="simulator-runtime",
         )
+
+    def test_a_uuid_runtime_vector_with_the_device_detector_is_refused(self):
+        identifier = "87FFA76D-3F75-4694-AA29-736859CD473C"
+        result = self.assertRefused(
+            ToolAction(
+                tool="simctl",
+                resource=identifier,
+                argv=(XCRUN, "simctl", "runtime", "delete", identifier),
+                preview_argv=(XCRUN, "simctl", "runtime", "list", "-j"),
+            ),
+            detector_id="simulator-unavailable-device",
+        )
+
+        self.assertIn("recorded command is not the contracted command", result.error)
 
     def test_an_sdkmanager_argv_with_extra_arguments_is_refused(self):
         self.assertRefused(
@@ -811,8 +842,14 @@ class ContractRefusalTests(unittest.TestCase):
 
         for action, preview in allowed:
             with self.subTest(resource=action.resource):
+                detector_id = {
+                    SIMCTL_DEVICES_PREVIEW_ARGV: "simulator-unavailable-device",
+                    SIMCTL_RUNTIMES_PREVIEW_ARGV: "simulator-runtime",
+                }.get(preview, "contract-probe")
                 _, runner = self.run_action(
-                    action, {preview: ok(preview, "")}
+                    action,
+                    {preview: ok(preview, "")},
+                    detector_id=detector_id,
                 )
 
                 # The preview ran, so the contract was allowed; the action did
@@ -1311,6 +1348,13 @@ class DockerCurrentEffectTests(ToolEffectCase):
         # Docker never agreed to.
         self.assertEqual(result.reclaimable_bytes, 3500000000)
 
+    def test_a_percentage_above_one_hundred_is_refused(self):
+        result = self.assertBoundedFailure(
+            self.item(), docker_line("Build Cache", "3.5GB (101%)", "10GB")
+        )
+
+        self.assertIn("figure that could not be read", result.error)
+
     def test_a_second_line_for_the_same_class_is_ambiguous(self):
         payload = (
             docker_line("Build Cache", "3.5GB", "10GB")
@@ -1740,7 +1784,9 @@ class AnalyzerEmittedEffectsRevalidateTests(ToolEffectCase):
 
         self.assertEqual(len(items), 1)
         item = items[0]
-        self.assertIsNone(contract_refusal(item.tool_action))
+        self.assertIsNone(
+            contract_refusal(item.tool_action, detector_id=item.detector_id)
+        )
         result = self.assertInvoked(item, devices)
         self.assertEqual(result.reclaimable_bytes, 2000000000)
 
@@ -1753,7 +1799,28 @@ class AnalyzerEmittedEffectsRevalidateTests(ToolEffectCase):
 
         self.assertEqual(len(items), 1)
         item = items[0]
-        self.assertIsNone(contract_refusal(item.tool_action))
+        self.assertIsNone(
+            contract_refusal(item.tool_action, detector_id=item.detector_id)
+        )
+        result = self.assertInvoked(item, runtimes)
+        self.assertEqual(result.reclaimable_bytes, 6000000000)
+
+    def test_the_emitted_uuid_simulator_runtime_uses_the_runtime_contract(self):
+        identifier = "87FFA76D-3F75-4694-AA29-736859CD473C"
+        location = self.root / "Runtimes" / "iOS 26.3.simruntime"
+        devices = devices_json({})
+        runtimes = runtimes_json(
+            [runtime_entry(identifier=identifier, path=str(location), name="iOS 26.3")]
+        )
+
+        items = self.simulator_items(devices, runtimes)
+
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item.detector_id, "simulator-runtime")
+        self.assertIsNone(
+            contract_refusal(item.tool_action, detector_id=item.detector_id)
+        )
         result = self.assertInvoked(item, runtimes)
         self.assertEqual(result.reclaimable_bytes, 6000000000)
 
@@ -1807,6 +1874,19 @@ class AnalyzerEmittedEffectsRevalidateTests(ToolEffectCase):
             with self.subTest(resource=item.tool_action.resource):
                 result = self.assertInvoked(item, payload)
                 self.assertEqual(result.reclaimable_bytes, 1000000000)
+
+    def test_the_emitted_docker_percentage_figure_revalidates(self):
+        payload = docker_line("Images", "15.56GB (70%)", "22.17GB")
+        items, reason = analyze_docker(
+            RecordingRunner({DOCKER_PREVIEW_ARGV: ok(DOCKER_PREVIEW_ARGV, payload)}),
+            generation=1,
+            home=self.root,
+        )
+
+        self.assertIsNone(reason)
+        self.assertEqual(len(items), 1)
+        result = self.assertInvoked(items[0], payload)
+        self.assertEqual(result.reclaimable_bytes, 15560000000)
 
     def test_the_emitted_homebrew_cleanup_revalidates_against_its_preview(self):
         items, reason = analyze_homebrew(

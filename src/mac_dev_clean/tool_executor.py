@@ -81,13 +81,13 @@ def _is_usable_identity(resource: str) -> bool:
     return not any(character < " " or character == "\x7f" for character in resource)
 
 
-def _contract_for(tool, resource):
-    # type: (str, str) -> Optional[Tuple[Tuple[str, ...], Tuple[str, ...]]]
-    """Regenerate the one (action, preview) pair allowed for this identity.
+def _contract_for(tool, resource, detector_id=None):
+    # type: (str, str, Optional[str]) -> Optional[Tuple[Tuple[str, ...], Tuple[str, ...]]]
+    """Regenerate the one (action, preview) pair allowed for this class and identity.
 
-    Nothing stored alongside the recommendation is consulted. The pair is
-    rebuilt here from the tool and the resource alone, so a stored vector can
-    only ever be compared against it -- never be the source of it.
+    The detector class and resource may only select one of the static contracts
+    defined here. Stored command vectors are never consulted to build a contract;
+    they can only be compared against the regenerated pair.
     """
     if tool == "docker":
         argv = _DOCKER_ACTION_ARGV.get(resource)
@@ -103,22 +103,28 @@ def _contract_for(tool, resource):
     if tool == "avdmanager":
         return ("avdmanager", "delete", "avd", "-n", resource), AVD_LIST_ARGV
     if tool == "simctl":
-        # One tool name, two contracts. They are kept disjoint on the resource
-        # so a device deletion can never be paired with the runtime listing:
-        # a UDID selects the device contract and nothing else can.
-        if is_safe_simctl_udid(resource):
+        # Runtime image identifiers can have exactly the same UUID shape as a
+        # device UDID. The analyzer's detector class selects the disjoint static
+        # contract; the stored vectors still only get compared with that contract.
+        if detector_id == "simulator-unavailable-device":
+            if not is_safe_simctl_udid(resource):
+                return None
             return (
                 (XCRUN, "simctl", "delete", resource),
                 SIMCTL_DEVICES_PREVIEW_ARGV,
             )
-        return (
-            (XCRUN, "simctl", "runtime", "delete", resource),
-            SIMCTL_RUNTIMES_PREVIEW_ARGV,
-        )
+        if detector_id == "simulator-runtime":
+            return (
+                (XCRUN, "simctl", "runtime", "delete", resource),
+                SIMCTL_RUNTIMES_PREVIEW_ARGV,
+            )
+        return None
     return None
 
 
-def contract_refusal(action: ToolAction) -> Optional[str]:
+def contract_refusal(
+    action: ToolAction, detector_id: Optional[str] = None
+) -> Optional[str]:
     """Return why this action is outside the contracts, or None if it is one.
 
     A recommendation arrives from an index file, which is only as trustworthy
@@ -133,7 +139,7 @@ def contract_refusal(action: ToolAction) -> Optional[str]:
                 origin, action.tool
             )
         )
-    contract = _contract_for(action.tool, action.resource)
+    contract = _contract_for(action.tool, action.resource, detector_id)
     if contract is None:
         return _bounded_reason(
             "{}: no contract covers {} resource {!r}".format(
@@ -286,7 +292,8 @@ _DOCKER_TYPES = {
 #: wrong for an authorisation: one means there is nothing to do, the other
 #: means the tool said something this program cannot understand.
 _FIGURE = re.compile(
-    r"^\s*(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)?\s*$", re.IGNORECASE
+    r"^\s*(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)?(?:\s+\((\d+(?:\.\d+)?)%\))?\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -327,7 +334,10 @@ def _figure_bytes(text: object) -> Optional[int]:
         return None
     try:
         value = float(match.group(1))
+        percentage = float(match.group(3)) if match.group(3) is not None else None
     except ValueError:
+        return None
+    if percentage is not None and not 0 <= percentage <= 100:
         return None
     if value == 0:
         return 0
@@ -640,11 +650,11 @@ def current_tool_effect(item: Recommendation, runner: ToolRunner) -> CurrentEffe
     if action.tool == "avdmanager":
         return _avdmanager_effect(item, action, result)
     if action.tool == "simctl":
-        # The same split the contract makes, so the preview that ran and the
-        # parser that reads it can never belong to different halves of simctl.
-        if is_safe_simctl_udid(action.resource):
+        if item.detector_id == "simulator-unavailable-device":
             return _simctl_device_effect(item, action, result)
-        return _simctl_runtime_effect(item, action, result)
+        if item.detector_id == "simulator-runtime":
+            return _simctl_runtime_effect(item, action, result)
+        raise _refuse(action, "no current-effect check covers this simulator class")
     # Unreachable while every contracted tool is handled above; a new contract
     # without a revalidation must refuse rather than silently authorise.
     raise _refuse(action, "no current-effect check covers this tool")
@@ -729,7 +739,7 @@ def invoke_tool_recommendations(
         # Before a runner is even chosen: the executable a runner would be
         # bound to comes out of `action.argv[0]`, so an unchecked action would
         # already have decided which binary the machine goes looking for.
-        refusal = contract_refusal(action)
+        refusal = contract_refusal(action, detector_id=item.detector_id)
         if refusal is not None:
             _journal(
                 observed_journal,
