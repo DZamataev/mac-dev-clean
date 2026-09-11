@@ -2,12 +2,14 @@ import os
 import shutil
 import json
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mac_dev_clean.deep_scan import deep_scan
 from mac_dev_clean.executor import ApplyOutcome, apply_recommendations
+from mac_dev_clean.fsevents import VolumeIdentity
 from mac_dev_clean.journal import ActionJournal
 from mac_dev_clean.recommendation import (
     ActionKind,
@@ -218,6 +220,11 @@ class ExecutorTests(unittest.TestCase):
         self.assertTrue(self.artifact.exists())
 
     def test_mixed_path_and_tool_actions_keep_input_order_and_one_journal_record_each(self):
+        generation = self.index.begin_generation(
+            VolumeIdentity(device=0, uuid=None), event_id=0
+        )
+        self.item = replace(self.item, generation=generation)
+        self.index.record_recommendation(self.item)
         tool_item = Recommendation(
             detector_id="docker-build-cache",
             category="tool-managed",
@@ -248,7 +255,7 @@ class ExecutorTests(unittest.TestCase):
             ),
         )
         self.index.record_recommendation(tool_item)
-        self.index.commit_batch()
+        self.index.complete_generation()
         preview = tool_item.tool_action.preview_argv
         action = tool_item.tool_action.argv
         calls = []

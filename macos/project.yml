@@ -79,6 +79,7 @@ targets:
           - $(SRCROOT)/../src/mac_dev_clean/index.py
           - $(SRCROOT)/../src/mac_dev_clean/journal.py
           - $(SRCROOT)/../src/mac_dev_clean/model.py
+          - $(SRCROOT)/../src/mac_dev_clean/ndk_usage.py
           - $(SRCROOT)/../src/mac_dev_clean/output.py
           - $(SRCROOT)/../src/mac_dev_clean/policy.py
           - $(SRCROOT)/../src/mac_dev_clean/projects.py
@@ -109,6 +110,7 @@ targets:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/index.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/journal.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/model.py
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/ndk_usage.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/output.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/policy.py
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/python/mac_dev_clean/projects.py
