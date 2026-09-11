@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,12 @@ from .deep_scan import deep_scan, default_deep_scan_roots
 from .events import EventEmitter
 from .executor import ApplyOutcome, apply_recommendations
 from .fsevents import VolumeIdentity
-from .index import DEFAULT_TOOL_INDEX_PATH, open_index
+from .index import (
+    DEFAULT_INDEX_PATH,
+    DEFAULT_TOOL_INDEX_PATH,
+    open_index,
+    read_project_ndk_usage_snapshot,
+)
 from .journal import open_journal, rotated_journal_path
 from .output import (
     clean_report_json,
@@ -331,6 +337,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Dedicated tool recommendation index path.",
     )
+    tools_parser.add_argument(
+        "--project-index",
+        type=Path,
+        default=None,
+        help="Read-only Deep Scan project index path.",
+    )
     tools_parser.add_argument("--json", action="store_true", help="Print JSON output.")
 
     tools_apply_parser = subparsers.add_parser(
@@ -552,6 +564,10 @@ def run_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
 def run_tools(args: argparse.Namespace) -> int:
     index_path = args.index if args.index is not None else DEFAULT_TOOL_INDEX_PATH.expanduser()
+    project_index = getattr(args, "project_index", None)
+    project_index_path = (
+        project_index if project_index is not None else DEFAULT_INDEX_PATH.expanduser()
+    )
     index = None
     report = None
     started = False
@@ -560,7 +576,15 @@ def run_tools(args: argparse.Namespace) -> int:
         index = open_index(index_path)
         generation = index.begin_generation(VolumeIdentity(device=0, uuid=None), event_id=0)
         started = True
-        report = collect_tool_recommendations(generation=generation, home=Path.home())
+        try:
+            ndk_usage_snapshot = read_project_ndk_usage_snapshot(project_index_path)
+        except (OSError, sqlite3.DatabaseError, ValueError):
+            ndk_usage_snapshot = None
+        report = collect_tool_recommendations(
+            generation=generation,
+            home=Path.home(),
+            ndk_usage_snapshot=ndk_usage_snapshot,
+        )
         for item in report.recommendations:
             index.record_recommendation(item)
         index.complete_generation()

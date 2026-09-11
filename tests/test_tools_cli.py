@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, cast
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
-from mac_dev_clean.cli import build_parser, main
+from mac_dev_clean.cli import build_parser, main, run_tools
 from mac_dev_clean.executor import ApplyOutcome, ApplyResult
-from mac_dev_clean.index import DEFAULT_TOOL_INDEX_PATH, open_index
+from mac_dev_clean.index import (
+    DEFAULT_INDEX_PATH,
+    DEFAULT_TOOL_INDEX_PATH,
+    open_index,
+)
 from mac_dev_clean.output import render_tool_table, tool_report_json
 from mac_dev_clean.recommendation import (
     ActionKind,
@@ -21,6 +27,8 @@ from mac_dev_clean.recommendation import (
     Recommendation,
     RestorationCost,
     ToolAction,
+    ToolUsage,
+    ToolUsageState,
 )
 from mac_dev_clean.tools.registry import ToolReport, ToolStatus
 
@@ -125,7 +133,7 @@ class ToolsInventoryTests(unittest.TestCase):
         real_open = open_index
         generations = []
 
-        def collect(generation, home):
+        def collect(generation, home, ndk_usage_snapshot=None):
             generations.append(generation)
             return ToolReport(
                 recommendations=[tool_recommendation(generation)],
@@ -167,7 +175,7 @@ class ToolsInventoryTests(unittest.TestCase):
         real_open = open_index
         reports = []
 
-        def collect(generation, home):
+        def collect(generation, home, ndk_usage_snapshot=None):
             if not reports:
                 report = ToolReport([tool_recommendation(generation)], [])
             else:
@@ -198,7 +206,7 @@ class ToolsInventoryTests(unittest.TestCase):
     def test_tools_collection_failure_retains_prior_generation_and_is_bounded(self):
         real_open = open_index
 
-        def initial(generation, home):
+        def initial(generation, home, ndk_usage_snapshot=None):
             return ToolReport([tool_recommendation(generation)], [])
 
         with patch("mac_dev_clean.cli.open_index", side_effect=real_open), patch(
@@ -274,6 +282,112 @@ class ToolsInventoryTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         opened.assert_called_once_with(DEFAULT_TOOL_INDEX_PATH.expanduser())
+
+    def test_tools_reads_explicit_project_index_and_joins_snapshot(self):
+        tool_index_path = Path(self.temp.name) / "tool-recommendations.sqlite3"
+        project_index_path = Path(self.temp.name) / "deep-scan.sqlite3"
+        index = Mock()
+        index.begin_generation.return_value = 7
+        snapshot = Mock()
+
+        with patch("mac_dev_clean.cli.open_index", return_value=index) as opened, patch(
+            "mac_dev_clean.cli.read_project_ndk_usage_snapshot",
+            return_value=snapshot,
+        ) as read_snapshot, patch(
+            "mac_dev_clean.cli.collect_tool_recommendations",
+            return_value=ToolReport([], []),
+        ) as collect:
+            code, _, error = self.run_cli(
+                [
+                    "tools",
+                    "--json",
+                    "--index",
+                    str(tool_index_path),
+                    "--project-index",
+                    str(project_index_path),
+                ]
+            )
+
+        self.assertEqual((code, error), (0, ""))
+        opened.assert_called_once_with(tool_index_path)
+        read_snapshot.assert_called_once_with(project_index_path)
+        collect.assert_called_once_with(
+            generation=ANY,
+            home=Path.home(),
+            ndk_usage_snapshot=snapshot,
+        )
+
+    def test_tools_missing_project_snapshot_keeps_unknown_ndk_result_contract(self):
+        index = Mock()
+        index.begin_generation.return_value = 3
+        item = replace(
+            tool_recommendation(3, detector_id="android-ndk"),
+            tool_usage=ToolUsage(state=ToolUsageState.UNKNOWN),
+        )
+
+        def collect(generation, home, ndk_usage_snapshot=None):
+            self.assertIsNone(ndk_usage_snapshot)
+            return ToolReport([item], [ToolStatus("android", True)])
+
+        with patch("mac_dev_clean.cli.open_index", return_value=index), patch(
+            "mac_dev_clean.cli.read_project_ndk_usage_snapshot", return_value=None
+        ) as read_snapshot, patch(
+            "mac_dev_clean.cli.collect_tool_recommendations", side_effect=collect
+        ):
+            code, output, error = self.run_cli(["tools", "--json"])
+
+        self.assertEqual((code, error), (0, ""))
+        read_snapshot.assert_called_once_with(DEFAULT_INDEX_PATH.expanduser())
+        payload = json.loads(output)
+        self.assertEqual(payload["reclaimable_total_bytes"], 10)
+        self.assertEqual(
+            set(payload["recommendations"][0]), set(item.to_dict())
+        )
+        self.assertEqual(
+            payload["recommendations"][0]["tool_usage"]["state"], "unknown"
+        )
+
+    def test_tools_project_snapshot_read_errors_fail_open_as_unknown(self):
+        for error in (
+            OSError("unreadable"),
+            sqlite3.DatabaseError("bad db"),
+            ValueError("bad data"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                index = Mock()
+                index.begin_generation.return_value = 5
+                collect = Mock(return_value=ToolReport([], []))
+                with patch("mac_dev_clean.cli.open_index", return_value=index), patch(
+                    "mac_dev_clean.cli.read_project_ndk_usage_snapshot", side_effect=error
+                ), patch(
+                    "mac_dev_clean.cli.collect_tool_recommendations", collect
+                ):
+                    code, _, error_output = self.run_cli(["tools", "--json"])
+
+                self.assertEqual((code, error_output), (0, ""))
+                collect.assert_called_once_with(
+                    generation=ANY,
+                    home=Path.home(),
+                    ndk_usage_snapshot=None,
+                )
+
+    def test_run_tools_legacy_namespace_uses_default_project_index(self):
+        index = Mock()
+        index.begin_generation.return_value = 1
+        args = Namespace(index=None, json=True)
+
+        with patch("mac_dev_clean.cli.open_index", return_value=index), patch(
+            "mac_dev_clean.cli.read_project_ndk_usage_snapshot", return_value=None
+        ) as read_snapshot, patch(
+            "mac_dev_clean.cli.collect_tool_recommendations",
+            return_value=ToolReport([], []),
+        ):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = run_tools(args)
+
+        self.assertEqual(code, 0)
+        read_snapshot.assert_called_once_with(DEFAULT_INDEX_PATH.expanduser())
 
 
 class ToolsApplyTests(unittest.TestCase):
@@ -356,6 +470,19 @@ class ToolsApplyTests(unittest.TestCase):
     def test_tools_apply_requires_id_before_opening_boundaries(self):
         with patch("mac_dev_clean.cli.open_index") as opened, self.assertRaises(SystemExit):
             self.run_cli(["tools-apply"])
+        opened.assert_not_called()
+
+    def test_tools_apply_does_not_accept_a_project_index(self):
+        with patch("mac_dev_clean.cli.open_index") as opened, self.assertRaises(SystemExit):
+            self.run_cli(
+                [
+                    "tools-apply",
+                    "--id",
+                    "shown-id",
+                    "--project-index",
+                    "/tmp/deep-scan.sqlite3",
+                ]
+            )
         opened.assert_not_called()
 
     def test_tools_apply_invocation_failure_is_safe_and_closes_index(self):
