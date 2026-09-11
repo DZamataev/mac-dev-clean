@@ -203,12 +203,22 @@ import Testing
 }
 
 @Test func toolBackendBuildsDedicatedCommandsFromThePersistedId() {
-    #expect(CleanupBackend.toolInventoryArguments == ["tools", "--json"])
+    #expect(
+        CleanupBackend.toolInventoryArguments(token: "token")
+            == ["tools", "--json", "--staging-token", "token"]
+    )
+    #expect(
+        CleanupBackend.toolAbandonArguments(token: "token")
+            == ["tools-abandon", "--token", "token", "--json"]
+    )
     #expect(
         CleanupBackend.toolApplyArguments(id: "persisted-id")
             == ["tools-apply", "--id", "persisted-id", "--json"]
     )
 }
+
+@Suite(.serialized)
+struct ToolProcessLifecycleTests {
 
 @Test func toolBackendDrainsLargeInventoryBeforeWaitingForExit() async throws {
     let fileManager = FileManager.default
@@ -232,7 +242,8 @@ import Testing
             pythonURL: executableURL,
             pythonPath: directory,
             workingDirectory: directory
-        )
+        ),
+        promoteStagedTools: { _, _, _ in }
     )
 
     let report = try await backend.loadTools()
@@ -441,6 +452,151 @@ import Testing
     }
 }
 
+@Test func toolManagedCompletionProtocolPreservesAndPromotesExactIndex() async throws {
+    let fileManager = FileManager.default
+    let directory = fileManager.temporaryDirectory
+        .appendingPathComponent("mac-dev-clean-completion-\(UUID().uuidString)", isDirectory: true)
+    try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: directory) }
+    let indexURL = directory.appendingPathComponent("tools.sqlite3")
+    let projectIndexURL = directory.appendingPathComponent("projects.sqlite3")
+    let modeURL = directory.appendingPathComponent("mode")
+    let legacyFinalizeStatusURL = directory.appendingPathComponent("legacy-finalize-status")
+    let authorityBeforeParentURL = directory.appendingPathComponent("authority-before-parent")
+    let repoSource = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("src")
+    let shimSource = directory.appendingPathComponent("python", isDirectory: true)
+    try fileManager.createDirectory(at: shimSource, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+        at: shimSource.appendingPathComponent("mac_dev_clean"),
+        withDestinationURL: repoSource.appendingPathComponent("mac_dev_clean")
+    )
+    let siteCustomize = """
+    import mac_dev_clean.cli as cli
+    from mac_dev_clean.tools.registry import ToolReport, ToolStatus
+    def collect(generation, home, ndk_usage_snapshot=None):
+        return ToolReport([], [ToolStatus("fixture", True)])
+    cli.collect_tool_recommendations = collect
+    """
+    try Data(siteCustomize.utf8).write(
+        to: shimSource.appendingPathComponent("sitecustomize.py")
+    )
+    let executableURL = directory.appendingPathComponent("python-wrapper")
+    let script = """
+    #!/bin/sh
+    export HOME='\(directory.path)/home'
+    export PATH=/usr/bin:/bin
+    mode=$(/bin/cat '\(modeURL.path)' 2>/dev/null || /bin/echo success)
+    command="$3"
+    if [ "$command" = tools ]; then
+      if [ "$mode" = timeout ]; then /bin/sleep 2; fi
+      /usr/bin/python3 "$@" --index '\(indexURL.path)' --project-index '\(projectIndexURL.path)' > '\(directory.path)/inventory.json' || exit $?
+      if [ "$mode" = legacy-finalize-attempt ]; then
+        token=
+        take_token=0
+        for argument in "$@"; do
+          if [ "$take_token" = 1 ]; then token="$argument"; take_token=0; fi
+          if [ "$argument" = --staging-token ]; then take_token=1; fi
+        done
+        /usr/bin/python3 -m mac_dev_clean tools-finalize --token "$token" --json --index '\(indexURL.path)' >/dev/null 2>&1
+        /bin/echo $? > '\(legacyFinalizeStatusURL.path)'
+        /usr/bin/sqlite3 '\(indexURL.path)' "select coalesce(max(generation), 0) from generations where completed_at is not null" > '\(authorityBeforeParentURL.path)'
+      fi
+      if [ "$mode" = promotion-failure ]; then
+        /usr/bin/sqlite3 '\(indexURL.path)' "CREATE TRIGGER fail_completed_delete BEFORE DELETE ON generations WHEN OLD.completed_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected'); END"
+      fi
+      case "$mode" in
+        malformed) /bin/echo '{' ;;
+        oversized) /usr/bin/python3 -c 'import sys; sys.stdout.write("x" * 9000000)' ;;
+        *) /bin/cat '\(directory.path)/inventory.json' ;;
+      esac
+    elif [ "$command" = tools-abandon ]; then
+      exec /usr/bin/python3 "$@" --index '\(indexURL.path)'
+    else
+      exec /usr/bin/python3 "$@" --index '\(indexURL.path)'
+    fi
+    """
+    try Data(script.utf8).write(to: executableURL)
+    try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+
+    func backend(mode: String, containmentFailure: Bool = false) throws -> CleanupBackend {
+        try Data(mode.utf8).write(to: modeURL)
+        return try CleanupBackend(
+            location: BackendLocation(
+                pythonURL: executableURL,
+                pythonPath: shimSource,
+                workingDirectory: directory
+            ),
+            commandTimeout: mode == "timeout" ? .milliseconds(200) : .seconds(30),
+            forcePostExitContainmentFailureForTesting: containmentFailure,
+            toolIndexURL: indexURL
+        )
+    }
+    func completeGeneration() throws -> Int {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [
+            "-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); r=c.execute('select max(generation) from generations where completed_at is not null').fetchone()[0]; print(r or 0)",
+            indexURL.path,
+        ]
+        process.standardOutput = output
+        try process.run()
+        process.waitUntilExit()
+        return Int(String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)!.trimmingCharacters(in: .whitespacesAndNewlines))!
+    }
+    func completedGenerationCount() throws -> Int {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [
+            "-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute('select count(*) from generations where completed_at is not null').fetchone()[0])",
+            indexURL.path,
+        ]
+        process.standardOutput = output
+        try process.run()
+        process.waitUntilExit()
+        return Int(String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)!.trimmingCharacters(in: .whitespacesAndNewlines))!
+    }
+
+    _ = try await backend(mode: "success").loadTools()
+    #expect(try completeGeneration() == 1)
+
+    _ = try await backend(mode: "legacy-finalize-attempt").loadTools()
+    #expect(try String(contentsOf: legacyFinalizeStatusURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) == "2")
+    #expect(try String(contentsOf: authorityBeforeParentURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) == "1")
+    #expect(try completeGeneration() == 2)
+    #expect(try completedGenerationCount() == 1)
+
+    for mode in ["malformed", "oversized", "timeout"] {
+        do {
+            _ = try await backend(mode: mode).loadTools()
+            Issue.record("Expected \(mode) inventory failure")
+        } catch {}
+        #expect(try completeGeneration() == 2)
+    }
+    do {
+        _ = try await backend(mode: "success", containmentFailure: true).loadTools()
+        Issue.record("Expected post-exit containment failure")
+    } catch {}
+    #expect(try completeGeneration() == 2)
+
+    _ = try await backend(mode: "success").loadTools()
+    #expect(try completeGeneration() == 6)
+
+    let authoritative = try completeGeneration()
+
+    do {
+        _ = try await backend(mode: "promotion-failure").loadTools()
+        Issue.record("Expected atomic local promotion failure")
+    } catch {}
+    #expect(try completeGeneration() == authoritative)
+}
+
+}
+
 @Test func toolManagedPageAndCommandPreviewAreExplicit() {
     #expect(SidebarPage.tools.rawValue == "Tool-managed")
     #expect(SidebarPage.tools.symbol == "wrench.and.screwdriver")
@@ -523,6 +679,39 @@ private actor ToolScanCancellationRecorder {
     func markCancelled() { wasCancelled = true }
 }
 
+private actor DelayedCancellationGate {
+    private(set) var started = false
+    private(set) var cancelled = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func markStarted() { started = true }
+    func markCancelled() { cancelled = true }
+    func waitForRelease() async {
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private struct DelayedCancellationToolBackend: ToolBackendProtocol {
+    let gate: DelayedCancellationGate
+
+    func loadTools() async throws -> ToolReport {
+        await gate.markStarted()
+        return try await withTaskCancellationHandler {
+            await gate.waitForRelease()
+            try Task.checkCancellation()
+            return toolReport(recommendations: [toolRecommendation()])
+        } onCancel: {
+            Task { await gate.markCancelled() }
+        }
+    }
+
+    func applyTool(id: String) async throws -> ToolApplyReport { invokedToolReport() }
+}
+
 private struct HangingToolBackend: ToolBackendProtocol {
     let recorder: ToolScanCancellationRecorder
 
@@ -603,6 +792,36 @@ private struct TranslatedCancellationErrorToolBackend: ToolBackendProtocol {
     #expect(model.toolScanWasCancelled)
     #expect(model.errorMessage == nil)
     #expect(await recorder.wasCancelled)
+}
+
+@MainActor
+@Test func cancelledToolScanRemainsBusyUntilBackendCleanupReleases() async throws {
+    let gate = DelayedCancellationGate()
+    let model = AppModel(
+        backend: ToolsEmptyCleanupBackend(),
+        toolBackend: DelayedCancellationToolBackend(gate: gate)
+    )
+    let scan = Task { await model.startToolScan() }
+    for _ in 0..<500 where await !gate.started {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    model.cancelToolScan()
+    for _ in 0..<500 where await !gate.cancelled {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(await gate.cancelled)
+    #expect(model.activity == .loadingTools)
+    #expect(model.isBusy)
+    #expect(model.toolReport == nil)
+
+    await gate.release()
+    await scan.value
+    #expect(model.activity == .idle)
+    #expect(!model.isBusy)
+    #expect(model.toolScanWasCancelled)
+    #expect(model.toolReport == nil)
 }
 
 @MainActor
@@ -1241,7 +1460,7 @@ private func fakeBackend(
     let fileManager = FileManager.default
     try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
     let executableURL = directory.appendingPathComponent("fake-python")
-    let script = "#!/bin/sh\n\(scriptBody)\n"
+    let script = "#!/bin/sh\nif [ \"$3\" = tools-abandon ]; then exit 0; fi\n\(scriptBody)\n"
     try Data(script.utf8).write(to: executableURL)
     try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
     return try CleanupBackend(
@@ -1250,7 +1469,8 @@ private func fakeBackend(
             pythonPath: directory,
             workingDirectory: directory
         ),
-        commandTimeout: commandTimeout
+        commandTimeout: commandTimeout,
+        promoteStagedTools: { _, _, _ in }
     )
 }
 

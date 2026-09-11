@@ -97,6 +97,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_reset_index(args)
         if args.command == "tools":
             return run_tools(args)
+        if args.command == "tools-abandon":
+            return run_tools_abandon(args)
         if args.command == "tools-apply":
             return run_tools_apply(args)
         if args.command == "journal":
@@ -344,6 +346,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read-only Deep Scan project index path.",
     )
     tools_parser.add_argument("--json", action="store_true", help="Print JSON output.")
+    tools_parser.add_argument("--staging-token", help=argparse.SUPPRESS)
+
+    tools_abandon_parser = subparsers.add_parser("tools-abandon", help=argparse.SUPPRESS)
+    tools_abandon_parser.add_argument("--token", required=True)
+    tools_abandon_parser.add_argument("--index", type=Path, default=None)
+    tools_abandon_parser.add_argument("--json", action="store_true")
 
     tools_apply_parser = subparsers.add_parser(
         "tools-apply",
@@ -572,9 +580,15 @@ def run_tools(args: argparse.Namespace) -> int:
     report = None
     started = False
     failed_safely = False
+    staging_token = getattr(args, "staging_token", None)
     try:
         index = open_index(index_path)
-        generation = index.begin_generation(VolumeIdentity(device=0, uuid=None), event_id=0)
+        if staging_token:
+            generation = index.stage_generation(
+                VolumeIdentity(device=0, uuid=None), event_id=0, token=staging_token
+            )
+        else:
+            generation = index.begin_generation(VolumeIdentity(device=0, uuid=None), event_id=0)
         started = True
         try:
             ndk_usage_snapshot = read_project_ndk_usage_snapshot(project_index_path)
@@ -587,7 +601,11 @@ def run_tools(args: argparse.Namespace) -> int:
         )
         for item in report.recommendations:
             index.record_recommendation(item)
-        index.complete_generation()
+        if staging_token:
+            index.commit_batch()
+            index.abandon_generation()
+        else:
+            index.complete_generation()
         started = False
     except Exception:
         failed_safely = True
@@ -612,9 +630,34 @@ def run_tools(args: argparse.Namespace) -> int:
         return 1
 
     if args.json:
-        print(json.dumps(tool_report_json(report), indent=2, sort_keys=True))
+        payload = tool_report_json(report)
+        if staging_token:
+            payload["staging_token"] = staging_token
+            payload["staging_index_path"] = str(Path(index_path).expanduser().resolve())
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(render_tool_table(report))
+    return 0
+
+
+def run_tools_abandon(args: argparse.Namespace) -> int:
+    index_path = args.index if args.index is not None else DEFAULT_TOOL_INDEX_PATH.expanduser()
+    index = None
+    try:
+        index = open_index(index_path)
+        index.abandon_staged_generation(args.token)
+    except Exception:
+        if args.json:
+            print(json.dumps({"ok": False}, sort_keys=True))
+        return 1
+    finally:
+        if index is not None:
+            try:
+                index.close()
+            except Exception:
+                return 1
+    if args.json:
+        print(json.dumps({"ok": True}, sort_keys=True))
     return 0
 
 

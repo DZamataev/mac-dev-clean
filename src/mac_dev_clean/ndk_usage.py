@@ -77,11 +77,12 @@ def _has_symlink_segment(root: Path, candidate: Path) -> bool:
     return False
 
 
-def _read_supported_file(root: Path, candidate: Path) -> Optional[str]:
+def _read_supported_file(root: Path, candidate: Path) -> Optional[Tuple[str, bool]]:
     if _has_symlink_segment(root, candidate) or not candidate.is_file():
         return None
     with candidate.open("r", encoding="utf-8", errors="replace") as stream:
-        return stream.read(_MAX_FILE_CHARACTERS)
+        bounded = stream.read(_MAX_FILE_CHARACTERS + 1)
+    return bounded[:_MAX_FILE_CHARACTERS], len(bounded) > _MAX_FILE_CHARACTERS
 
 
 def _gradle_code_mask(text: str) -> str:
@@ -248,9 +249,10 @@ def analyze_project_ndk_usage(repository: Repository) -> Optional[ProjectNdkUsag
     declarations = []
     native_evidence = set()
     for candidate in _candidate_paths(root):
-        text = _read_supported_file(root, candidate)
-        if text is None:
+        read_result = _read_supported_file(root, candidate)
+        if read_result is None:
             continue
+        text, was_truncated = read_result
         relative_path = candidate.relative_to(root).as_posix()
         if relative_path in _NATIVE_MARKER_FILES:
             native_evidence.add("{0}:native-metadata".format(relative_path))
@@ -258,6 +260,8 @@ def analyze_project_ndk_usage(repository: Repository) -> Optional[ProjectNdkUsag
         code = _gradle_code_mask(text) if is_gradle else text
         if is_gradle:
             file_declarations = list(_gradle_literal_declarations(text, code))
+            if was_truncated:
+                file_declarations = []
         else:
             file_declarations = list(_properties_declarations(text))
         if is_gradle and _NDK_VERSION_MARKER_RE.search(code) and not file_declarations:

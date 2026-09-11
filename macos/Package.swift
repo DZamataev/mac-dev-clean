@@ -13,7 +13,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "MacDevCleanApp",
-            path: "Sources/MacDevCleanApp"
+            path: "Sources/MacDevCleanApp",
+            linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .testTarget(
             name: "MacDevCleanAppTests",

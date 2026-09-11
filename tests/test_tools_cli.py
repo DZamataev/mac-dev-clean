@@ -203,6 +203,185 @@ class ToolsInventoryTests(unittest.TestCase):
         finally:
             index.close()
 
+    def test_app_staging_rejects_legacy_cli_finalize_before_parent_promotion(self):
+        real_open = open_index
+
+        def collect(generation, home, ndk_usage_snapshot=None):
+            return ToolReport([tool_recommendation(generation)], [])
+
+        with patch("mac_dev_clean.cli.open_index", side_effect=real_open), patch(
+            "mac_dev_clean.cli.collect_tool_recommendations", side_effect=collect
+        ):
+            _, first_output, _ = self.run_cli(
+                ["tools", "--json", "--index", str(self.index_path)]
+            )
+            code, staged_output, _ = self.run_cli([
+                "tools", "--json", "--index", str(self.index_path),
+                "--staging-token", "validated-run",
+            ])
+        old_id = json.loads(first_output)["recommendations"][0]["id"]
+        new_payload = json.loads(staged_output)
+        new_id = new_payload["recommendations"][0]["id"]
+        self.assertEqual(new_payload["staging_token"], "validated-run")
+        self.assertEqual(new_payload["staging_index_path"], str(self.index_path.resolve()))
+        self.assertEqual(old_id, new_id)
+        self.assertEqual(code, 0)
+
+        with self.assertRaises(SystemExit) as rejected:
+            self.run_cli([
+                "tools-finalize", "--token", "validated-run", "--json",
+                "--index", str(self.index_path),
+            ])
+        self.assertEqual(rejected.exception.code, 2)
+        index = real_open(self.index_path)
+        try:
+            self.assertEqual(index.latest_complete_generation(), 1)
+            self.assertEqual(index.load_recommendation(old_id).generation, 1)
+            index.finalize_staged_generation("validated-run")
+            self.assertEqual(index.latest_complete_generation(), 2)
+            promoted = index.load_recommendation(new_id)
+            self.assertIsNotNone(promoted)
+            assert promoted is not None
+            self.assertEqual(promoted.generation, 2)
+            with self.assertRaisesRegex(ValueError, "not found"):
+                index.finalize_staged_generation("validated-run")
+        finally:
+            index.close()
+
+        with patch("mac_dev_clean.cli.open_journal", return_value=Mock()):
+            apply_code, apply_output, _ = self.run_cli([
+                "tools-apply", "--id", new_id, "--dry-run", "--json",
+                "--index", str(self.index_path),
+            ])
+        self.assertIn(apply_code, (0, 1))
+        self.assertNotEqual(
+            json.loads(apply_output)["results"][0]["error"],
+            "recommendation not found in the current scan",
+        )
+
+    def test_overlapping_staged_generations_finalize_independently_in_either_order(self):
+        real_open = open_index
+
+        def collect(generation, home, ndk_usage_snapshot=None):
+            return ToolReport([tool_recommendation(generation)], [])
+
+        for order in (("stage-a", "stage-b"), ("stage-b", "stage-a")):
+            with self.subTest(order=order), tempfile.TemporaryDirectory() as temporary:
+                index_path = Path(temporary) / "tools.sqlite3"
+                with patch("mac_dev_clean.cli.open_index", side_effect=real_open), patch(
+                    "mac_dev_clean.cli.collect_tool_recommendations", side_effect=collect
+                ):
+                    for token in ("stage-a", "stage-b"):
+                        code, _, _ = self.run_cli([
+                            "tools", "--json", "--index", str(index_path),
+                            "--staging-token", token,
+                        ])
+                        self.assertEqual(code, 0)
+
+                expected_generation = {"stage-a": 1, "stage-b": 2}
+                for position, token in enumerate(order):
+                    index = real_open(index_path)
+                    try:
+                        index.finalize_staged_generation(token)
+                        self.assertEqual(
+                            index.latest_complete_generation(), expected_generation[token]
+                        )
+                        if position == 0:
+                            other = order[1]
+                            with sqlite3.connect(index_path) as connection:
+                                remaining = connection.execute(
+                                    "SELECT completed_at FROM generations WHERE staging_token = ?",
+                                    (other,),
+                                ).fetchone()
+                            self.assertIsNotNone(remaining)
+                            self.assertIsNone(remaining[0])
+                    finally:
+                        index.close()
+
+    def test_staged_and_public_generations_complete_independently_in_either_order(self):
+        real_open = open_index
+
+        def collect(generation, home, ndk_usage_snapshot=None):
+            return ToolReport([tool_recommendation(generation)], [])
+
+        for public_first in (True, False):
+            with self.subTest(public_first=public_first), tempfile.TemporaryDirectory() as temporary:
+                index_path = Path(temporary) / "tools.sqlite3"
+                with patch("mac_dev_clean.cli.open_index", side_effect=real_open), patch(
+                    "mac_dev_clean.cli.collect_tool_recommendations", side_effect=collect
+                ):
+                    stage_code, _, _ = self.run_cli([
+                        "tools", "--json", "--index", str(index_path),
+                        "--staging-token", "app-stage",
+                    ])
+                    self.assertEqual(stage_code, 0)
+                    if public_first:
+                        public_code, _, _ = self.run_cli([
+                            "tools", "--json", "--index", str(index_path)
+                        ])
+                        self.assertEqual(public_code, 0)
+
+                index = real_open(index_path)
+                try:
+                    index.finalize_staged_generation("app-stage")
+                finally:
+                    index.close()
+
+                if not public_first:
+                    with patch("mac_dev_clean.cli.open_index", side_effect=real_open), patch(
+                        "mac_dev_clean.cli.collect_tool_recommendations", side_effect=collect
+                    ):
+                        public_code, _, _ = self.run_cli([
+                            "tools", "--json", "--index", str(index_path)
+                        ])
+                    self.assertEqual(public_code, 0)
+
+                index = real_open(index_path)
+                try:
+                    self.assertEqual(index.latest_complete_generation(), 1 if public_first else 2)
+                finally:
+                    index.close()
+
+    def test_tools_abandon_is_idempotent_and_cannot_delete_completed_data(self):
+        real_open = open_index
+        with patch("mac_dev_clean.cli.open_index", side_effect=real_open), patch(
+            "mac_dev_clean.cli.collect_tool_recommendations",
+            side_effect=lambda generation, home, ndk_usage_snapshot=None: ToolReport(
+                [tool_recommendation(generation)], []
+            ),
+        ):
+            self.run_cli(["tools", "--json", "--index", str(self.index_path)])
+            self.run_cli([
+                "tools", "--json", "--index", str(self.index_path),
+                "--staging-token", "failed-run",
+            ])
+            self.run_cli([
+                "tools", "--json", "--index", str(self.index_path),
+                "--staging-token", "completed-run",
+            ])
+        index = real_open(self.index_path)
+        try:
+            index.finalize_staged_generation("completed-run")
+            self.assertEqual(index.latest_complete_generation(), 3)
+        finally:
+            index.close()
+
+        for token in ("failed-run", "failed-run", "completed-run", "completed-run"):
+            code, output, error = self.run_cli([
+                "tools-abandon", "--token", token, "--json",
+                "--index", str(self.index_path),
+            ])
+            self.assertEqual((code, json.loads(output), error), (0, {"ok": True}, ""))
+
+        index = real_open(self.index_path)
+        try:
+            self.assertEqual(index.latest_complete_generation(), 3)
+            self.assertIsNotNone(index.load_recommendation(tool_recommendation(3).id))
+            with self.assertRaisesRegex(ValueError, "not found"):
+                index.finalize_staged_generation("failed-run")
+        finally:
+            index.close()
+
     def test_tools_collection_failure_retains_prior_generation_and_is_bounded(self):
         real_open = open_index
 
@@ -341,7 +520,14 @@ class ToolsInventoryTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["reclaimable_total_bytes"], 10)
         self.assertEqual(
-            set(payload["recommendations"][0]), set(item.to_dict())
+            set(payload["recommendations"][0]),
+            {
+                "id", "detector_id", "category", "label", "path", "action",
+                "allocated_bytes", "reclaimable_bytes", "size", "confidence",
+                "restoration", "selected_by_default", "evidence", "safety_root",
+                "reason", "warning", "generation", "last_activity_at",
+                "tool_action", "tool_usage",
+            },
         )
         self.assertEqual(
             payload["recommendations"][0]["tool_usage"]["state"], "unknown"

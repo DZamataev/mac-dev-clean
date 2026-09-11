@@ -23,7 +23,7 @@ from .recommendation import (
     normalized_path,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DEFAULT_INDEX_PATH = Path("~/Library/Caches/mac-dev-clean/index.sqlite3")
 DEFAULT_TOOL_INDEX_PATH = Path("~/Library/Caches/mac-dev-clean/tools.sqlite3")
@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS generations (
     volume_uuid TEXT,
     event_id INTEGER NOT NULL,
     started_at REAL NOT NULL,
-    completed_at REAL
+    completed_at REAL,
+    staging_token TEXT UNIQUE
 );
 CREATE TABLE IF NOT EXISTS recommendations (
     id TEXT NOT NULL,
@@ -113,32 +114,85 @@ class ScanIndex:
         self._generation = int(cursor.lastrowid)
         return self._generation
 
+    def stage_generation(self, volume: VolumeIdentity, event_id: int, token: str) -> int:
+        if not token:
+            raise ValueError("staging token is required")
+        cursor = self._connection.execute(
+            "INSERT INTO generations"
+            " (device, volume_uuid, event_id, started_at, staging_token)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (volume.device, volume.uuid, event_id, time.time(), token),
+        )
+        self._connection.commit()
+        self._generation = int(cursor.lastrowid)
+        return self._generation
+
     def commit_batch(self) -> None:
         self._connection.commit()
 
     def complete_generation(self) -> None:
         if self._generation is None:
             raise ValueError("no generation is in progress")
-        self._connection.execute(
-            "UPDATE generations SET completed_at = ? WHERE generation = ?",
-            (time.time(), self._generation),
-        )
-        self._connection.execute(
-            "DELETE FROM recommendations WHERE generation != ?", (self._generation,)
-        )
-        self._connection.execute(
-            "DELETE FROM project_ndk_usages WHERE generation != ?", (self._generation,)
-        )
-        self._connection.execute(
-            "DELETE FROM generations WHERE generation != ?", (self._generation,)
-        )
-        self._connection.commit()
+        generation = self._generation
+        try:
+            self._connection.execute(
+                "UPDATE generations SET completed_at = ? WHERE generation = ?",
+                (time.time(), generation),
+            )
+            self._connection.execute(
+                "DELETE FROM recommendations WHERE generation IN"
+                " (SELECT generation FROM generations"
+                " WHERE completed_at IS NOT NULL AND generation != ?)",
+                (generation,),
+            )
+            self._connection.execute(
+                "DELETE FROM project_ndk_usages WHERE generation IN"
+                " (SELECT generation FROM generations"
+                " WHERE completed_at IS NOT NULL AND generation != ?)",
+                (generation,),
+            )
+            self._connection.execute(
+                "DELETE FROM generations"
+                " WHERE completed_at IS NOT NULL AND generation != ?",
+                (generation,),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            self._generation = None
+            raise
         self._generation = None
 
     def abandon_generation(self) -> None:
         """Leave an interrupted generation on disk but never complete it, so
         `latest_complete_generation` keeps returning the previous good scan."""
+        self._connection.rollback()
         self._generation = None
+
+    def finalize_staged_generation(self, token: str) -> None:
+        row = self._connection.execute(
+            "SELECT generation FROM generations"
+            " WHERE staging_token = ? AND completed_at IS NULL",
+            (token,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("staged generation not found")
+        self._generation = int(row[0])
+        self.complete_generation()
+
+    def abandon_staged_generation(self, token: str) -> None:
+        for table in ("recommendations", "project_ndk_usages"):
+            self._connection.execute(
+                "DELETE FROM {0} WHERE generation IN"
+                " (SELECT generation FROM generations WHERE staging_token = ?"
+                " AND completed_at IS NULL)".format(table),
+                (token,),
+            )
+        self._connection.execute(
+            "DELETE FROM generations WHERE staging_token = ? AND completed_at IS NULL",
+            (token,),
+        )
+        self._connection.commit()
 
     def latest_complete_generation(self) -> Optional[int]:
         row = self._connection.execute(

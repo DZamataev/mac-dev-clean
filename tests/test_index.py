@@ -142,6 +142,44 @@ class ScanIndexTests(unittest.TestCase):
         self.assertEqual(rows, [(second, "/Users/test/current")])
         self.assertNotEqual(first, second)
 
+    def test_failed_completion_rolls_back_recommendations_and_usage_across_reopen(self):
+        first = self.index.begin_generation(self.volume, event_id=330)
+        old_recommendation = build_recommendation(first, "/Users/test/old/node_modules")
+        old_usage = ProjectNdkUsage(Path("/Users/test/old"), "27.0", ("old",))
+        self.index.record_recommendation(old_recommendation)
+        self.index.record_project_ndk_usage(old_usage)
+        self.index.complete_generation()
+
+        second = self.index.begin_generation(self.volume, event_id=340)
+        new_recommendation = build_recommendation(second, "/Users/test/new/node_modules")
+        self.index.record_recommendation(new_recommendation)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(Path("/Users/test/new"), "28.0", ("new",))
+        )
+        self.index.commit_batch()
+        self.index.execute_for_test(
+            "CREATE TRIGGER fail_old_usage_delete BEFORE DELETE ON project_ndk_usages "
+            "WHEN OLD.generation != {0} BEGIN SELECT RAISE(ABORT, 'injected'); END".format(
+                second
+            )
+        )
+
+        with self.assertRaisesRegex(sqlite3.DatabaseError, "injected"):
+            self.index.complete_generation()
+
+        self.assertEqual(self.index.latest_complete_generation(), first)
+        self.assertIsNotNone(self.index.load_recommendation(old_recommendation.id))
+        self.assertEqual(self.index.load_project_ndk_usage_snapshot().usages, (old_usage,))
+
+        self.index.begin_generation(self.volume, event_id=350)
+        self.assertEqual(self.index.latest_complete_generation(), first)
+        self.index.close()
+        self.index = open_index(self.path)
+
+        self.assertEqual(self.index.latest_complete_generation(), first)
+        self.assertIsNotNone(self.index.load_recommendation(old_recommendation.id))
+        self.assertEqual(self.index.load_project_ndk_usage_snapshot().usages, (old_usage,))
+
     def test_read_only_usage_loader_does_not_mutate_unusable_indexes(self):
         absent = Path(self.temp.name) / "absent.sqlite3"
         self.assertIsNone(read_project_ndk_usage_snapshot(absent))

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SQLite3
 
 enum BackendError: LocalizedError {
     case sourceNotFound
@@ -61,19 +62,41 @@ protocol ToolBackendProtocol: Sendable {
 struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
     let location: BackendLocation
     let commandTimeout: Duration
+    let forcePostExitContainmentFailureForTesting: Bool
+    let forcePostExitContainmentFailureCommandForTesting: String?
+    let toolIndexURL: URL
+    let promoteStagedTools: @Sendable (Data, String, URL) throws -> Void
 
     private static let stdoutLimit = 8 * 1_024 * 1_024
     private static let stderrLimit = 64 * 1_024
 
-    static let toolInventoryArguments = ["tools", "--json"]
+    static func toolInventoryArguments(token: String) -> [String] {
+        ["tools", "--json", "--staging-token", token]
+    }
+
+    static func toolAbandonArguments(token: String) -> [String] {
+        ["tools-abandon", "--token", token, "--json"]
+    }
 
     static func toolApplyArguments(id: String) -> [String] {
         ["tools-apply", "--id", id, "--json"]
     }
 
-    init(location: BackendLocation? = nil, commandTimeout: Duration = .seconds(300)) throws {
+    init(
+        location: BackendLocation? = nil,
+        commandTimeout: Duration = .seconds(300),
+        forcePostExitContainmentFailureForTesting: Bool = false,
+        forcePostExitContainmentFailureCommandForTesting: String? = nil,
+        toolIndexURL: URL? = nil,
+        promoteStagedTools: @escaping @Sendable (Data, String, URL) throws -> Void = CleanupBackend.promoteStagedTools
+    ) throws {
         self.location = try location ?? BackendLocator.locate()
         self.commandTimeout = commandTimeout
+        self.forcePostExitContainmentFailureForTesting = forcePostExitContainmentFailureForTesting
+        self.forcePostExitContainmentFailureCommandForTesting = forcePostExitContainmentFailureCommandForTesting
+        self.toolIndexURL = toolIndexURL ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/mac-dev-clean/tools.sqlite3")
+        self.promoteStagedTools = promoteStagedTools
     }
 
     func scan() async throws -> ScanReport {
@@ -100,11 +123,105 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
     }
 
     func loadTools() async throws -> ToolReport {
-        let result = try await run(arguments: Self.toolInventoryArguments, honorsCancellation: true)
-        guard result.terminationStatus == 0 else {
-            throw Self.commandFailure(operation: "tool inventory", result: result)
+        let token = UUID().uuidString
+        do {
+            let result = try await run(
+                arguments: Self.toolInventoryArguments(token: token) + ["--index", toolIndexURL.path],
+                honorsCancellation: true
+            )
+            guard result.terminationStatus == 0 else {
+                throw Self.commandFailure(operation: "tool inventory", result: result)
+            }
+            let report = try Self.decode(ToolReport.self, from: result.stdout)
+            try promoteStagedTools(result.stdout, token, toolIndexURL)
+            return report
+        } catch {
+            _ = try? await run(
+                arguments: Self.toolAbandonArguments(token: token)
+                    + ["--index", toolIndexURL.path]
+            )
+            throw error
         }
-        return try Self.decode(ToolReport.self, from: result.stdout)
+    }
+
+    private struct ToolStagingEnvelope: Decodable {
+        let token: String
+        let indexPath: String
+
+        private enum CodingKeys: String, CodingKey {
+            case token = "staging_token"
+            case indexPath = "staging_index_path"
+        }
+    }
+
+    private static func promoteStagedTools(
+        _ data: Data,
+        expectedToken: String,
+        expectedIndexURL: URL
+    ) throws {
+        let envelope = try decode(ToolStagingEnvelope.self, from: data)
+        let expectedPath = realpath(expectedIndexURL.path, nil).map { pointer in
+            defer { free(pointer) }
+            return String(cString: pointer)
+        } ?? expectedIndexURL.path
+        guard envelope.token == expectedToken,
+              envelope.indexPath == expectedPath
+        else {
+            throw BackendError.invalidOutput("Tool inventory returned invalid staging authority.")
+        }
+
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(
+            expectedIndexURL.path,
+            &database,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK, let database else {
+            if let database { sqlite3_close(database) }
+            throw BackendError.invalidOutput("Tool inventory staging index could not be opened.")
+        }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5_000)
+
+        func execute(_ sql: String) throws {
+            var message: UnsafeMutablePointer<CChar>?
+            guard sqlite3_exec(database, sql, nil, nil, &message) == SQLITE_OK else {
+                if let message { sqlite3_free(message) }
+                throw BackendError.invalidOutput("Tool inventory staging transition failed.")
+            }
+        }
+
+        let quotedToken = envelope.token.replacingOccurrences(of: "'", with: "''")
+        do {
+            try execute("BEGIN IMMEDIATE")
+            var statement: OpaquePointer?
+            let lookup = "SELECT generation FROM generations WHERE staging_token = '\(quotedToken)' AND completed_at IS NULL"
+            guard sqlite3_prepare_v2(database, lookup, -1, &statement, nil) == SQLITE_OK,
+                  sqlite3_step(statement) == SQLITE_ROW
+            else {
+                sqlite3_finalize(statement)
+                throw BackendError.invalidOutput("Tool inventory staging generation was not found.")
+            }
+            let generation = sqlite3_column_int64(statement, 0)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                sqlite3_finalize(statement)
+                throw BackendError.invalidOutput("Tool inventory staging authority was ambiguous.")
+            }
+            sqlite3_finalize(statement)
+
+            try execute("UPDATE generations SET completed_at = \(Date().timeIntervalSince1970) WHERE generation = \(generation) AND completed_at IS NULL")
+            guard sqlite3_changes(database) == 1 else {
+                throw BackendError.invalidOutput("Tool inventory staging generation could not be promoted.")
+            }
+            for table in ["recommendations", "project_ndk_usages"] {
+                try execute("DELETE FROM \(table) WHERE generation IN (SELECT generation FROM generations WHERE completed_at IS NOT NULL AND generation != \(generation))")
+            }
+            try execute("DELETE FROM generations WHERE completed_at IS NOT NULL AND generation != \(generation)")
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
 
     func applyTool(id: String) async throws -> ToolApplyReport {
@@ -659,6 +776,11 @@ struct CleanupBackend: CleanupBackendProtocol, ToolBackendProtocol, Sendable {
                 Self.killFrozenProcesses(escaped)
                 containmentFailed = true
             }
+        }
+        if (forcePostExitContainmentFailureForTesting && arguments.first == "tools")
+            || arguments.first == forcePostExitContainmentFailureCommandForTesting
+        {
+            containmentFailed = true
         }
         if containmentFailed {
             try? process.stdout.close()

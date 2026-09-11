@@ -375,6 +375,22 @@ class ProjectNdkUsageTests(unittest.TestCase):
 
             self.assertIsNone(analyze_project_ndk_usage(repository))
 
+    def test_truncated_quoted_prefix_dynamic_expression_is_unpinned(self):
+        declaration = 'ndkVersion = "27.0.12077973"'
+        prefix = " " * ((256 * 1024) - len(declaration)) + declaration
+        with TemporaryDirectory() as raw_tmp:
+            repository = make_repository(
+                Path(raw_tmp) / "app",
+                "android/build.gradle",
+                prefix + " + suffix",
+            )
+
+            usage = analyze_project_ndk_usage(repository)
+
+            self.assertIsNotNone(usage)
+            self.assertIsNone(usage.version)
+            self.assertEqual(usage.evidence, ("android/build.gradle:ndkVersion",))
+
     def test_invalid_utf8_is_replaced_while_reading_bounded_metadata(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "app"
