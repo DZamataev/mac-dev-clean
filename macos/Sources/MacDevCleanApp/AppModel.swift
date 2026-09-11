@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activity: Activity = .idle
     @Published private(set) var deepScanState = DeepScanState()
     @Published private(set) var toolReport: ToolReport?
+    @Published private(set) var toolScanWasCancelled = false
     @Published var selectedFlags: Set<String> = []
     @Published var errorMessage: String?
     @Published var warningMessage: String?
@@ -55,6 +56,7 @@ final class AppModel: ObservableObject {
     private let toolBackend: (any ToolBackendProtocol)?
     private let startupError: Error?
     private var deepScanTask: Task<Void, Never>?
+    private var toolScanTask: Task<ToolReport, Error>?
 
     init(
         backend: (any CleanupBackendProtocol)? = nil,
@@ -112,7 +114,7 @@ final class AppModel: ObservableObject {
     }
 
     var isBusy: Bool { activity != .idle }
-    var toolScanButtonTitle: String { toolReport == nil ? "Scan Tools" : "Refresh Tools" }
+    var toolScanButtonTitle: String { toolReport == nil ? "Start Tool Scan" : "Scan Again" }
 
     func scanIfNeeded() async {
         guard report == nil else { return }
@@ -164,13 +166,14 @@ final class AppModel: ObservableObject {
         activity = .idle
     }
 
-    func loadTools() async {
+    func startToolScan() async {
         await loadTools(preservingMessages: false)
     }
 
     private func loadTools(preservingMessages: Bool) async {
         guard !isBusy else { return }
         toolReport = nil
+        toolScanWasCancelled = false
         guard let toolBackend else {
             errorMessage = startupError?.localizedDescription ?? "The tool inventory is unavailable."
             warningMessage = nil
@@ -182,24 +185,43 @@ final class AppModel: ObservableObject {
         if !preservingMessages {
             dismissMessage()
         }
+        let task = Task { try await toolBackend.loadTools() }
+        toolScanTask = task
         do {
-            toolReport = try await toolBackend.loadTools()
-        } catch {
-            let refreshFailure = error.localizedDescription
-            if preservingMessages, let errorMessage {
-                self.errorMessage = "\(errorMessage)\n\nTool inventory could not refresh:\n\(refreshFailure)"
-            } else if let warningMessage {
-                errorMessage = "\(warningMessage)\n\nTool inventory could not refresh:\n\(refreshFailure)"
-                self.warningMessage = nil
-            } else if noticeMessage != nil {
-                errorMessage = "Tool cleanup finished, but inventory could not refresh:\n\(refreshFailure)"
-                noticeMessage = nil
+            let newReport = try await task.value
+            if task.isCancelled {
+                toolScanWasCancelled = true
             } else {
-                errorMessage = refreshFailure
+                toolReport = newReport
+            }
+        } catch is CancellationError {
+            toolScanWasCancelled = true
+        } catch {
+            if task.isCancelled {
+                toolScanWasCancelled = true
+            } else {
+                let refreshFailure = error.localizedDescription
+                if preservingMessages, let errorMessage {
+                    self.errorMessage = "\(errorMessage)\n\nTool inventory could not refresh:\n\(refreshFailure)"
+                } else if let warningMessage {
+                    errorMessage = "\(warningMessage)\n\nTool inventory could not refresh:\n\(refreshFailure)"
+                    self.warningMessage = nil
+                } else if noticeMessage != nil {
+                    errorMessage = "Tool cleanup finished, but inventory could not refresh:\n\(refreshFailure)"
+                    noticeMessage = nil
+                } else {
+                    errorMessage = refreshFailure
+                }
             }
         }
+        toolScanTask = nil
         refreshDiskSpace()
         activity = .idle
+    }
+
+    func cancelToolScan() {
+        toolScanWasCancelled = true
+        toolScanTask?.cancel()
     }
 
     func applyTool(id: String) async {

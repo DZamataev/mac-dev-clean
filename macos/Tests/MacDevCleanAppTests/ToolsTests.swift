@@ -496,7 +496,7 @@ import Testing
 }
 
 @MainActor
-@Test func toolScanActionStartsAsManualScanThenBecomesRefresh() async {
+@Test func toolScanActionStartsAsManualScanThenBecomesScanAgain() async {
     let state = StubToolBackendState(
         reports: [toolReport(recommendations: [])],
         applyReport: invokedToolReport()
@@ -506,13 +506,147 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    #expect(model.toolScanButtonTitle == "Scan Tools")
+    #expect(model.toolScanButtonTitle == "Start Tool Scan")
     #expect(await state.loadCount == 0)
 
-    await model.loadTools()
+    await model.startToolScan()
 
-    #expect(model.toolScanButtonTitle == "Refresh Tools")
+    #expect(model.toolScanButtonTitle == "Scan Again")
     #expect(await state.loadCount == 1)
+}
+
+private actor ToolScanCancellationRecorder {
+    private(set) var hasStarted = false
+    private(set) var wasCancelled = false
+
+    func markStarted() { hasStarted = true }
+    func markCancelled() { wasCancelled = true }
+}
+
+private struct HangingToolBackend: ToolBackendProtocol {
+    let recorder: ToolScanCancellationRecorder
+
+    func loadTools() async throws -> ToolReport {
+        await recorder.markStarted()
+        return try await withTaskCancellationHandler {
+            try await Task.sleep(for: .seconds(60))
+            return toolReport(recommendations: [])
+        } onCancel: {
+            Task { await recorder.markCancelled() }
+        }
+    }
+
+    func applyTool(id: String) async throws -> ToolApplyReport {
+        invokedToolReport()
+    }
+}
+
+private struct PartialReportOnCancellationToolBackend: ToolBackendProtocol {
+    let recorder: ToolScanCancellationRecorder
+
+    func loadTools() async throws -> ToolReport {
+        await recorder.markStarted()
+        do {
+            try await Task.sleep(for: .seconds(60))
+            return toolReport(recommendations: [])
+        } catch is CancellationError {
+            await recorder.markCancelled()
+            return toolReport(recommendations: [toolRecommendation()])
+        }
+    }
+
+    func applyTool(id: String) async throws -> ToolApplyReport {
+        invokedToolReport()
+    }
+}
+
+private struct TranslatedCancellationErrorToolBackend: ToolBackendProtocol {
+    let recorder: ToolScanCancellationRecorder
+
+    func loadTools() async throws -> ToolReport {
+        await recorder.markStarted()
+        do {
+            try await Task.sleep(for: .seconds(60))
+            return toolReport(recommendations: [])
+        } catch is CancellationError {
+            await recorder.markCancelled()
+            throw ToolBackendStubError.load
+        }
+    }
+
+    func applyTool(id: String) async throws -> ToolApplyReport {
+        invokedToolReport()
+    }
+}
+
+@MainActor
+@Test func cancelToolScanStopsTheRunningScan() async throws {
+    let recorder = ToolScanCancellationRecorder()
+    let model = AppModel(
+        backend: ToolsEmptyCleanupBackend(),
+        toolBackend: HangingToolBackend(recorder: recorder)
+    )
+
+    let scan = Task { await model.startToolScan() }
+    for _ in 0..<500 where await !recorder.hasStarted {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(await recorder.hasStarted, "the fake backend never started scanning")
+    #expect(model.activity == .loadingTools)
+    #expect(model.toolScanButtonTitle == "Start Tool Scan")
+
+    model.cancelToolScan()
+    await scan.value
+
+    #expect(!model.isBusy)
+    #expect(model.toolScanWasCancelled)
+    #expect(model.errorMessage == nil)
+    #expect(await recorder.wasCancelled)
+}
+
+@MainActor
+@Test func cancelledToolScanDoesNotExposeAPartialReport() async throws {
+    let recorder = ToolScanCancellationRecorder()
+    let model = AppModel(
+        backend: ToolsEmptyCleanupBackend(),
+        toolBackend: PartialReportOnCancellationToolBackend(recorder: recorder)
+    )
+
+    let scan = Task { await model.startToolScan() }
+    for _ in 0..<500 where await !recorder.hasStarted {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await recorder.hasStarted, "the fake backend never started scanning")
+
+    model.cancelToolScan()
+    await scan.value
+
+    #expect(model.toolReport == nil)
+    #expect(model.toolScanWasCancelled)
+    #expect(model.toolScanButtonTitle == "Start Tool Scan")
+}
+
+@MainActor
+@Test func cancelledToolScanDoesNotPublishATranslatedBackendError() async throws {
+    let recorder = ToolScanCancellationRecorder()
+    let model = AppModel(
+        backend: ToolsEmptyCleanupBackend(),
+        toolBackend: TranslatedCancellationErrorToolBackend(recorder: recorder)
+    )
+
+    let scan = Task { await model.startToolScan() }
+    for _ in 0..<500 where await !recorder.hasStarted {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await recorder.hasStarted, "the fake backend never started scanning")
+
+    model.cancelToolScan()
+    await scan.value
+
+    #expect(model.toolReport == nil)
+    #expect(model.toolScanWasCancelled)
+    #expect(model.errorMessage == nil)
 }
 
 @MainActor
@@ -526,7 +660,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
 
     #expect(model.toolReport?.statuses.count == 2)
     #expect(model.toolReport?.statuses.last?.available == false)
@@ -542,7 +676,7 @@ import Testing
     )
     let model = AppModel(backend: CombinedToolCleanupBackend(state: state))
 
-    await model.loadTools()
+    await model.startToolScan()
 
     #expect(model.toolReport?.statuses.count == 2)
     #expect(await state.loadCount == 1)
@@ -562,7 +696,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await model.applyTool(id: "persisted-id")
 
     #expect(await state.appliedIds == ["persisted-id"])
@@ -603,7 +737,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await model.applyTool(id: "persisted-id")
 
     #expect(await state.appliedIds == ["persisted-id"])
@@ -623,7 +757,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await model.applyTool(id: "not-displayed")
 
     #expect(await state.appliedIds.isEmpty)
@@ -661,7 +795,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await model.applyTool(id: "persisted-id")
 
     #expect(await state.appliedIds == ["persisted-id"])
@@ -684,9 +818,9 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await state.failNextLoad()
-    await model.loadTools()
+    await model.startToolScan()
     await model.applyTool(id: "persisted-id")
 
     #expect(model.toolReport == nil)
@@ -708,7 +842,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await state.failNextApply()
     await model.applyTool(id: "persisted-id")
 
@@ -749,7 +883,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await model.applyTool(id: "persisted-id")
 
     #expect(model.warningMessage?.contains("Docker build cache") == true)
@@ -789,7 +923,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await model.applyTool(id: "persisted-id")
 
     #expect(model.warningMessage == "Tool action was not changed. refused")
@@ -806,7 +940,7 @@ import Testing
         toolBackend: StubToolBackend(state: state)
     )
 
-    await model.loadTools()
+    await model.startToolScan()
     await state.failNextApply()
     await state.failNextLoad()
     await model.applyTool(id: "persisted-id")

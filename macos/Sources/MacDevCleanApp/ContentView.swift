@@ -86,19 +86,7 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 640)
         .toolbar {
             ToolbarItemGroup {
-                if selectedPage == .tools {
-                    Button {
-                        Task { await model.loadTools() }
-                    } label: {
-                        Label(model.toolScanButtonTitle, systemImage: "arrow.clockwise")
-                    }
-                    .disabled(model.isBusy)
-                    .help(
-                        model.toolReport == nil
-                            ? "Scan tool-managed storage"
-                            : "Refresh tool-managed storage"
-                    )
-                } else if selectedPage != .about && selectedPage != .deepScan {
+                if selectedPage != .about && selectedPage != .deepScan && selectedPage != .tools {
                     Button {
                         Task { await model.scan() }
                     } label: {
@@ -447,24 +435,16 @@ struct ToolManagedView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 overview
+                toolScanControls
 
                 if let report = model.toolReport {
                     statuses(report.statuses)
                     recommendations(report.recommendations)
-                } else if model.activity.showsToolScanIndicator {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .accessibilityLabel("Scanning tool-managed storage")
-                        Text(model.activity.message)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 120)
                 } else {
                     ContentUnavailableView(
                         "Tool Inventory Not Loaded",
                         systemImage: "wrench.and.screwdriver",
-                        description: Text("Use Scan Tools to inspect storage through each tool's own CLI.")
+                        description: Text("Start Tool Scan to inspect storage through each tool's own CLI.")
                     )
                     .padding(.top, 50)
                 }
@@ -508,6 +488,38 @@ struct ToolManagedView: View {
             Text(ByteFormatter.string(model.toolReport?.reclaimableTotalBytes ?? 0))
                 .font(.title3.monospacedDigit().bold())
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private var toolScanControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                if model.activity.showsToolScanIndicator {
+                    Button("Cancel Scan") { model.cancelToolScan() }
+                } else {
+                    Button(model.toolScanButtonTitle) {
+                        Task { await model.startToolScan() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy)
+                }
+
+                if model.activity.showsToolScanIndicator {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Scanning tool-managed storage")
+                    Text(model.activity.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if model.toolScanWasCancelled {
+                Text("Scan cancelled.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         }
     }
 
