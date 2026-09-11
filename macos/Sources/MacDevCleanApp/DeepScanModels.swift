@@ -102,6 +102,30 @@ struct ToolActionPayload: Decodable, Hashable, Sendable {
     }
 }
 
+struct ToolUsageSection: Hashable, Sendable {
+    let title: String
+    let paths: [String]
+}
+
+enum ToolUsageState: String, Decodable, Hashable, Sendable {
+    case matched
+    case unreferenced
+    case unknown
+}
+
+struct ToolUsagePayload: Decodable, Hashable, Sendable {
+    let state: ToolUsageState
+    let projects: [String]
+    let unpinnedProjects: [String]
+    let scanCompletedAt: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case state, projects
+        case unpinnedProjects = "unpinned_projects"
+        case scanCompletedAt = "scan_completed_at"
+    }
+}
+
 struct ToolRecommendation: Decodable, Identifiable, Hashable, Sendable {
     let id: String
     let detectorId: String
@@ -113,6 +137,37 @@ struct ToolRecommendation: Decodable, Identifiable, Hashable, Sendable {
     let warning: String
     let selectedByDefault: Bool
     let toolAction: ToolActionPayload?
+    let toolUsage: ToolUsagePayload?
+
+    nonisolated var usageSummary: String? {
+        guard let toolUsage else { return nil }
+        switch toolUsage.state {
+        case .matched:
+            let count = toolUsage.projects.count
+            return "Used by \(count) project\(count == 1 ? "" : "s")"
+        case .unreferenced:
+            return "Not referenced by scanned projects"
+        case .unknown:
+            return "Usage unknown — run Deep Scan"
+        }
+    }
+
+    nonisolated var usageSections: [ToolUsageSection] {
+        guard let toolUsage else { return [] }
+        var sections: [ToolUsageSection] = []
+        if !toolUsage.projects.isEmpty {
+            sections.append(ToolUsageSection(title: "Matching version", paths: toolUsage.projects))
+        }
+        if !toolUsage.unpinnedProjects.isEmpty {
+            sections.append(
+                ToolUsageSection(
+                    title: "Uses an unpinned NDK",
+                    paths: toolUsage.unpinnedProjects
+                )
+            )
+        }
+        return sections
+    }
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -125,6 +180,7 @@ struct ToolRecommendation: Decodable, Identifiable, Hashable, Sendable {
         case reclaimableBytes = "reclaimable_bytes"
         case selectedByDefault = "selected_by_default"
         case toolAction = "tool_action"
+        case toolUsage = "tool_usage"
     }
 }
 

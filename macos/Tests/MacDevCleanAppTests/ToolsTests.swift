@@ -111,6 +111,60 @@ import Testing
     #expect(report.statuses[1].reason == "not installed")
     #expect(report.recommendations.count == 1)
     #expect(report.recommendations[0].toolAction?.argv == ["docker", "builder", "prune", "-f"])
+    #expect(report.recommendations[0].toolUsage == nil)
+}
+
+@Test func toolReportDecodesNdkUsageAndFormatsMatchedSummary() throws {
+    let recommendation = try decodeToolRecommendation(toolUsage: #"""
+    {
+      "state": "matched",
+      "projects": ["/Users/test/app-a", "/Users/test/app-b"],
+      "unpinned_projects": ["/Users/test/app-c"],
+      "scan_completed_at": "2026-09-11T00:00:00+00:00"
+    }
+    """#)
+
+    #expect(recommendation.toolUsage?.state == .matched)
+    #expect(recommendation.toolUsage?.projects == ["/Users/test/app-a", "/Users/test/app-b"])
+    #expect(recommendation.toolUsage?.unpinnedProjects == ["/Users/test/app-c"])
+    #expect(recommendation.toolUsage?.scanCompletedAt == "2026-09-11T00:00:00+00:00")
+    #expect(recommendation.usageSummary == "Used by 2 projects")
+    #expect(
+        recommendation.usageSections == [
+            ToolUsageSection(
+                title: "Matching version",
+                paths: ["/Users/test/app-a", "/Users/test/app-b"]
+            ),
+            ToolUsageSection(
+                title: "Uses an unpinned NDK",
+                paths: ["/Users/test/app-c"]
+            ),
+        ]
+    )
+}
+
+@Test func toolReportDecodesNdkUsageSummaryStatesAndSingularCount() throws {
+    let unreferenced = try decodeToolRecommendation(toolUsage: #"""
+    {"state":"unreferenced","projects":[],"unpinned_projects":[],"scan_completed_at":"2026-09-11T00:00:00+00:00"}
+    """#)
+    let unknown = try decodeToolRecommendation(toolUsage: #"""
+    {"state":"unknown","projects":[],"unpinned_projects":[],"scan_completed_at":null}
+    """#)
+    let singular = try decodeToolRecommendation(toolUsage: #"""
+    {"state":"matched","projects":["/Users/test/app-a"],"unpinned_projects":[],"scan_completed_at":"2026-09-11T00:00:00+00:00"}
+    """#)
+
+    #expect(unreferenced.usageSummary == "Not referenced by scanned projects")
+    #expect(unknown.usageSummary == "Usage unknown — run Deep Scan")
+    #expect(singular.usageSummary == "Used by 1 project")
+}
+
+@Test func toolReportDecodesNdkUsageMissingKeyAsNil() throws {
+    let recommendation = try decodeToolRecommendation(toolUsage: nil)
+
+    #expect(recommendation.toolUsage == nil)
+    #expect(recommendation.usageSummary == nil)
+    #expect(recommendation.usageSections.isEmpty)
 }
 
 @Test func unavailableToolsRemainInAnEmptyReport() throws {
@@ -794,6 +848,28 @@ import Testing
     #expect(model.errorMessage?.contains("storage scan refresh failed") == true)
 }
 
+private func decodeToolRecommendation(toolUsage: String?) throws -> ToolRecommendation {
+    let usageMember = toolUsage.map { ",\"tool_usage\":\($0)" } ?? ""
+    let json = #"""
+    {
+      "reclaimable_total_bytes": 10,
+      "statuses": [],
+      "recommendations": [{
+        "id": "ndk-27", "detector_id": "android-ndk", "category": "tool-managed",
+        "label": "Android NDK 27.0.1", "reclaimable_bytes": 10, "size": "10 B",
+        "reason": "Installed Android SDK package.", "warning": "",
+        "selected_by_default": false,
+        "tool_action": {
+          "tool": "android", "resource": "ndk;27.0.1",
+          "argv": ["sdkmanager", "--uninstall", "ndk;27.0.1"],
+          "preview_argv": ["sdkmanager", "--list_installed"], "reported": "10 B"
+        }\#(usageMember)
+      }]
+    }
+    """#
+    return try JSONDecoder().decode(ToolReport.self, from: Data(json.utf8)).recommendations[0]
+}
+
 private func toolRecommendation(label: String = "Docker build cache") -> ToolRecommendation {
     ToolRecommendation(
         id: "persisted-id",
@@ -811,7 +887,8 @@ private func toolRecommendation(label: String = "Docker build cache") -> ToolRec
             argv: ["docker", "builder", "prune", "-f"],
             previewArgv: ["docker", "system", "df"],
             reported: "10 B"
-        )
+        ),
+        toolUsage: nil
     )
 }
 

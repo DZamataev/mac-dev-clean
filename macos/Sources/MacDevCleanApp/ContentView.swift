@@ -554,6 +554,22 @@ struct ToolManagedView: View {
     }
 
     private func recommendationRow(_ recommendation: ToolRecommendation) -> some View {
+        ToolRecommendationRow(
+            recommendation: recommendation,
+            isBusy: model.isBusy
+        ) {
+            pendingRecommendation = recommendation
+        }
+    }
+}
+
+private struct ToolRecommendationRow: View {
+    let recommendation: ToolRecommendation
+    let isBusy: Bool
+    let run: () -> Void
+    @State private var isUsageExpanded = false
+
+    var body: some View {
         HStack(alignment: .top, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -566,6 +582,33 @@ struct ToolManagedView: View {
                 Text(recommendation.reason)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                if let usageSummary = recommendation.usageSummary {
+                    Text(usageSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if !recommendation.usageSections.isEmpty {
+                    DisclosureGroup("Project usage", isExpanded: $isUsageExpanded) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(recommendation.usageSections, id: \.title) { section in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(section.title)
+                                        .font(.caption.weight(.semibold))
+                                    ForEach(section.paths, id: \.self) { path in
+                                        Text(path)
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                    .font(.caption)
+                }
                 Text(recommendation.toolAction?.displayCommand ?? "Command unavailable")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -578,12 +621,10 @@ struct ToolManagedView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button("Run") {
-                pendingRecommendation = recommendation
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .disabled(model.isBusy || recommendation.toolAction == nil)
+            Button("Run", action: run)
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(isBusy || recommendation.toolAction == nil)
         }
         .padding(14)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
