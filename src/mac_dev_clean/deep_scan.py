@@ -10,6 +10,7 @@ from . import fsevents
 from .discovery import MAX_DEPTH, discover_repositories
 from .events import EventEmitter
 from .index import ScanIndex
+from .ndk_usage import analyze_project_ndk_usage
 from .policy import recommend
 from .projects import analyze_repository
 from .recommendation import Recommendation, normalized_path
@@ -125,7 +126,7 @@ def _check_protected_folder_access(root: Path, emitter: Optional[EventEmitter]) 
             continue
 
 
-def deep_scan(
+def _deep_scan(
     roots: Sequence[Path],
     index: ScanIndex,
     emitter: Optional[EventEmitter] = None,
@@ -219,6 +220,18 @@ def deep_scan(
                 break
             repositories += 1
             try:
+                ndk_usage = analyze_project_ndk_usage(repository)
+            except OSError as exc:
+                if emitter is not None:
+                    emitter.warning(str(exc), path=normalized_path(repository.path))
+            else:
+                if ndk_usage is not None:
+                    index.record_project_ndk_usage(ndk_usage)
+                    pending += 1
+                    if pending >= COMMIT_EVERY:
+                        index.commit_batch()
+                        pending = 0
+            try:
                 facts = analyze_repository(repository, now=moment)
             except OSError as exc:
                 if emitter is not None:
@@ -273,3 +286,26 @@ def deep_scan(
             reclaimable_bytes=result.reclaimable_bytes, count=len(result.recommendations)
         )
     return result
+
+
+def deep_scan(
+    roots: Sequence[Path],
+    index: ScanIndex,
+    emitter: Optional[EventEmitter] = None,
+    now: Optional[datetime] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    use_fsevents: bool = True,
+) -> DeepScanResult:
+    """Run a Deep Scan and abandon its generation if the scan raises."""
+    try:
+        return _deep_scan(
+            roots,
+            index,
+            emitter=emitter,
+            now=now,
+            should_cancel=should_cancel,
+            use_fsevents=use_fsevents,
+        )
+    except Exception:
+        index.abandon_generation()
+        raise

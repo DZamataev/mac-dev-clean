@@ -1,11 +1,17 @@
 import json
+import sqlite3
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mac_dev_clean.fsevents import VolumeIdentity
-from mac_dev_clean.index import SCHEMA_VERSION, open_index
+from mac_dev_clean.index import (
+    SCHEMA_VERSION,
+    open_index,
+    read_project_ndk_usage_snapshot,
+)
+from mac_dev_clean.ndk_usage import ProjectNdkUsage
 from mac_dev_clean.recommendation import (
     ActionKind,
     Confidence,
@@ -48,6 +54,262 @@ class ScanIndexTests(unittest.TestCase):
 
     def test_schema_version_is_recorded(self):
         self.assertEqual(self.index.schema_version(), SCHEMA_VERSION)
+
+    def test_project_ndk_usage_tracks_only_the_latest_complete_generation(self):
+        self.index.begin_generation(self.volume, event_id=100)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(
+                Path("/Users/test/z-app"),
+                "27.0.12077973",
+                ("android/build.gradle:ndkVersion",),
+            )
+        )
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(
+                Path("/Users/test/a-app"),
+                None,
+                ("android/CMakeLists.txt:native-marker",),
+            )
+        )
+        self.index.complete_generation()
+
+        original = self.index.load_project_ndk_usage_snapshot()
+        self.assertIsNotNone(original)
+        self.assertEqual(
+            original.usages,
+            (
+                ProjectNdkUsage(
+                    Path("/Users/test/a-app"),
+                    None,
+                    ("android/CMakeLists.txt:native-marker",),
+                ),
+                ProjectNdkUsage(
+                    Path("/Users/test/z-app"),
+                    "27.0.12077973",
+                    ("android/build.gradle:ndkVersion",),
+                ),
+            ),
+        )
+
+        self.index.begin_generation(self.volume, event_id=200)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(
+                Path("/Users/test/new"),
+                None,
+                ("android/CMakeLists.txt:native-marker",),
+            )
+        )
+        self.index.abandon_generation()
+        self.assertEqual(self.index.load_project_ndk_usage_snapshot(), original)
+
+        self.index.begin_generation(self.volume, event_id=300)
+        replacement = ProjectNdkUsage(
+            Path("/Users/test/replacement"),
+            "28.0.13004108",
+            ("build.gradle:ndkVersion",),
+        )
+        self.index.record_project_ndk_usage(replacement)
+        self.index.complete_generation()
+
+        latest = self.index.load_project_ndk_usage_snapshot()
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.usages, (replacement,))
+
+    def test_completing_new_generation_deletes_stale_usage_rows(self):
+        first = self.index.begin_generation(self.volume, event_id=310)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(Path("/Users/test/stale"), None, ("old",))
+        )
+        self.index.complete_generation()
+
+        second = self.index.begin_generation(self.volume, event_id=320)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(Path("/Users/test/current"), None, ("new",))
+        )
+        self.index.complete_generation()
+
+        connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT generation, project_path FROM project_ndk_usages"
+                " ORDER BY generation, project_path"
+            ).fetchall()
+        finally:
+            connection.close()
+
+        self.assertEqual(rows, [(second, "/Users/test/current")])
+        self.assertNotEqual(first, second)
+
+    def test_read_only_usage_loader_does_not_mutate_unusable_indexes(self):
+        absent = Path(self.temp.name) / "absent.sqlite3"
+        self.assertIsNone(read_project_ndk_usage_snapshot(absent))
+        self.assertFalse(absent.exists())
+
+        corrupt = Path(self.temp.name) / "corrupt.sqlite3"
+        corrupt.write_bytes(b"this is not a database")
+        corrupt_bytes = corrupt.read_bytes()
+        self.assertIsNone(read_project_ndk_usage_snapshot(corrupt))
+        self.assertEqual(corrupt.read_bytes(), corrupt_bytes)
+
+        old_schema = Path(self.temp.name) / "old.sqlite3"
+        connection = sqlite3.connect(str(old_schema))
+        connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION - 1),),
+        )
+        connection.commit()
+        connection.close()
+        old_bytes = old_schema.read_bytes()
+
+        self.assertIsNone(read_project_ndk_usage_snapshot(old_schema))
+        self.assertEqual(old_schema.read_bytes(), old_bytes)
+
+    def test_read_only_usage_loader_returns_a_complete_snapshot(self):
+        path = Path(self.temp.name) / "snapshot #1?.sqlite3"
+        index = open_index(path)
+        index.begin_generation(self.volume, event_id=400)
+        usage = ProjectNdkUsage(
+            Path("/Users/test/app"),
+            "27.0.12077973",
+            ("android/build.gradle:ndkVersion",),
+        )
+        index.record_project_ndk_usage(usage)
+        index.complete_generation()
+        index.close()
+
+        snapshot = read_project_ndk_usage_snapshot(path)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.usages, (usage,))
+        self.assertIsNotNone(snapshot.completed_at.tzinfo)
+
+    def test_read_only_usage_loader_rejects_out_of_range_timestamp_without_mutation(self):
+        generation = self.index.begin_generation(self.volume, event_id=425)
+        self.index.complete_generation()
+        self.index.execute_for_test(
+            "UPDATE generations SET completed_at = ? WHERE generation = ?",
+            (1e300, generation),
+        )
+        before = self.path.read_bytes()
+
+        self.assertIsNone(read_project_ndk_usage_snapshot(self.path))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_read_only_usage_loader_rejects_invalid_evidence_shapes_without_mutation(self):
+        generation = self.index.begin_generation(self.volume, event_id=430)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(Path("/Users/test/app"), None, ("valid",))
+        )
+        self.index.complete_generation()
+
+        invalid_shapes = ({"source": "marker"}, "marker", [1], None)
+        for invalid in invalid_shapes:
+            with self.subTest(evidence=invalid):
+                self.index.execute_for_test(
+                    "UPDATE project_ndk_usages SET evidence = ? WHERE generation = ?",
+                    (json.dumps(invalid), generation),
+                )
+                before = self.path.read_bytes()
+
+                self.assertIsNone(read_project_ndk_usage_snapshot(self.path))
+                self.assertEqual(self.path.read_bytes(), before)
+
+    def test_read_only_usage_loader_rejects_invalid_path_and_version_types(self):
+        generation = self.index.begin_generation(self.volume, event_id=435)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(Path("/Users/test/app"), None, ("valid",))
+        )
+        self.index.complete_generation()
+
+        corruptions = (
+            ("project_path", sqlite3.Binary(b"/Users/test/app")),
+            ("version", sqlite3.Binary(b"27.0.12077973")),
+        )
+        for column, invalid in corruptions:
+            with self.subTest(column=column):
+                self.index.execute_for_test(
+                    "UPDATE project_ndk_usages SET project_path = ?, version = ?"
+                    " WHERE generation = ?",
+                    ("/Users/test/app", None, generation),
+                )
+                self.index.execute_for_test(
+                    "UPDATE project_ndk_usages SET {0} = ? WHERE generation = ?".format(
+                        column
+                    ),
+                    (invalid, generation),
+                )
+                before = self.path.read_bytes()
+
+                self.assertIsNone(read_project_ndk_usage_snapshot(self.path))
+                self.assertEqual(self.path.read_bytes(), before)
+
+    def test_read_only_usage_loader_rejects_invalid_generation_row_types(self):
+        corruptions = (
+            (sqlite3.Binary(b"1"), 1.0),
+            (1, sqlite3.Binary(b"1")),
+        )
+        for case, (generation, completed_at) in enumerate(corruptions):
+            with self.subTest(case=case):
+                path = Path(self.temp.name) / "invalid-generation-{0}.sqlite3".format(
+                    case
+                )
+                connection = sqlite3.connect(str(path))
+                connection.execute("CREATE TABLE meta (key, value)")
+                connection.execute("CREATE TABLE generations (generation, completed_at)")
+                connection.execute(
+                    "CREATE TABLE project_ndk_usages"
+                    " (generation, project_path, version, evidence)"
+                )
+                connection.execute(
+                    "INSERT INTO meta VALUES ('schema_version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
+                connection.execute(
+                    "INSERT INTO generations VALUES (?, ?)",
+                    (generation, completed_at),
+                )
+                connection.commit()
+                connection.close()
+                before = path.read_bytes()
+
+                self.assertIsNone(read_project_ndk_usage_snapshot(path))
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_record_project_ndk_usage_requires_an_active_generation(self):
+        with self.assertRaisesRegex(ValueError, "no generation is in progress"):
+            self.index.record_project_ndk_usage(
+                ProjectNdkUsage(Path("/Users/test/app"), None, ())
+            )
+
+    def test_record_project_ndk_usage_rejects_records_after_completion(self):
+        self.index.begin_generation(self.volume, event_id=450)
+        self.index.complete_generation()
+
+        with self.assertRaisesRegex(ValueError, "no generation is in progress"):
+            self.index.record_project_ndk_usage(
+                ProjectNdkUsage(Path("/Users/test/late"), None, ())
+            )
+
+    def test_record_project_ndk_usage_normalizes_and_replaces_a_project_path(self):
+        self.index.begin_generation(self.volume, event_id=500)
+        self.index.record_project_ndk_usage(
+            ProjectNdkUsage(Path("/Users/test/other/../app"), None, ("old",))
+        )
+        replacement = ProjectNdkUsage(
+            Path("/Users/test/app"),
+            "27.0.12077973",
+            ("android/build.gradle:ndkVersion",),
+        )
+        self.index.record_project_ndk_usage(replacement)
+        self.index.complete_generation()
+
+        snapshot = self.index.load_project_ndk_usage_snapshot()
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.usages, (replacement,))
 
     def test_incomplete_generation_is_not_returned_as_latest(self):
         generation = self.index.begin_generation(self.volume, event_id=100)

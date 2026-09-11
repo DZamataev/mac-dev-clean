@@ -160,6 +160,88 @@ class DeepScanTests(unittest.TestCase):
         self.assertIsNotNone(self.index.latest_complete_generation())
         self.assertIsNotNone(self.index.load_recommendation(item.id))
 
+    def test_ndk_usage_is_persisted_for_every_discovered_repository(self):
+        with_artifact = self.home / "projects" / "with-artifact"
+        build_stale_project(with_artifact)
+        touch(
+            with_artifact / "android" / "build.gradle",
+            OLD,
+            b'android { ndkVersion "27.0.12077973" }',
+        )
+        usage_only = self.home / "projects" / "usage-only"
+        (usage_only / ".git").mkdir(parents=True)
+        touch(
+            usage_only / "android" / "build.gradle",
+            OLD,
+            b'android { ndkVersion "27.0.12077973" }',
+        )
+
+        deep_scan([self.home], self.index, now=NOW, use_fsevents=False)
+
+        snapshot = self.index.load_project_ndk_usage_snapshot()
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(
+            tuple(usage.project_path for usage in snapshot.usages),
+            (usage_only, with_artifact),
+        )
+        self.assertEqual(
+            {usage.version for usage in snapshot.usages}, {"27.0.12077973"}
+        )
+
+    def test_ndk_usage_only_project_emits_no_candidate_found_event(self):
+        project = self.home / "projects" / "usage-only"
+        (project / ".git").mkdir(parents=True)
+        touch(
+            project / "android" / "build.gradle",
+            OLD,
+            b'android { ndkVersion "27.0.12077973" }',
+        )
+        stream = io.StringIO()
+
+        deep_scan(
+            [self.home],
+            self.index,
+            emitter=EventEmitter(stream, generation=1),
+            now=NOW,
+            use_fsevents=False,
+        )
+
+        snapshot = self.index.load_project_ndk_usage_snapshot()
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(tuple(usage.project_path for usage in snapshot.usages), (project,))
+        events = [json.loads(line)["event"] for line in stream.getvalue().splitlines()]
+        self.assertNotIn("candidate_found", events)
+
+    def test_ndk_metadata_failure_warns_without_skipping_artifact_analysis(self):
+        expected = build_stale_project(self.home / "app")
+        stream = io.StringIO()
+
+        with patch.object(
+            deep_scan_module,
+            "analyze_project_ndk_usage",
+            side_effect=OSError("metadata denied"),
+        ):
+            result = deep_scan(
+                [self.home],
+                self.index,
+                emitter=EventEmitter(stream, generation=1),
+                now=NOW,
+                use_fsevents=False,
+            )
+
+        self.assertIn(expected, {item.path for item in result.recommendations})
+        events = [json.loads(line) for line in stream.getvalue().splitlines() if line]
+        warnings = [event for event in events if event["event"] == "warning"]
+        self.assertTrue(
+            any(
+                event["message"] == "metadata denied"
+                and event["path"] == str(self.home / "app")
+                for event in warnings
+            )
+        )
+
     def test_streamed_events_end_with_scan_completed(self):
         build_stale_project(self.home / "app")
         stream = io.StringIO()
@@ -196,6 +278,70 @@ class DeepScanTests(unittest.TestCase):
         self.assertEqual(self.index.latest_complete_generation(), good_generation)
         events = [json.loads(line)["event"] for line in stream.getvalue().splitlines() if line]
         self.assertEqual(events[-1], "scan_cancelled")
+
+    def test_cancellation_preserves_the_previous_ndk_usage_snapshot(self):
+        project = self.home / "app"
+        (project / ".git").mkdir(parents=True)
+        metadata = project / "android" / "build.gradle"
+        touch(metadata, OLD, b'android { ndkVersion "27.0.12077973" }')
+        deep_scan([self.home], self.index, now=NOW, use_fsevents=False)
+        original = self.index.load_project_ndk_usage_snapshot()
+        self.assertIsNotNone(original)
+
+        metadata.write_bytes(b'android { ndkVersion "28.0.13004108" }')
+        repositories = list(deep_scan_module.discover_repositories([self.home]))
+        self.assertEqual(len(repositories), 1)
+        analysed = False
+        analyze = deep_scan_module.analyze_project_ndk_usage
+
+        def analyze_then_cancel(repository):
+            nonlocal analysed
+            usage = analyze(repository)
+            analysed = True
+            return usage
+
+        with patch.object(
+            deep_scan_module,
+            "discover_repositories",
+            return_value=[repositories[0], repositories[0]],
+        ), patch.object(
+            deep_scan_module,
+            "analyze_project_ndk_usage",
+            side_effect=analyze_then_cancel,
+        ):
+            result = deep_scan(
+                [self.home],
+                self.index,
+                now=NOW,
+                should_cancel=lambda: analysed,
+                use_fsevents=False,
+            )
+
+        self.assertTrue(result.cancelled)
+        self.assertEqual(self.index.load_project_ndk_usage_snapshot(), original)
+
+    def test_exception_abandons_generation_and_preserves_previous_ndk_snapshot(self):
+        project = self.home / "app"
+        (project / ".git").mkdir(parents=True)
+        metadata = project / "android" / "build.gradle"
+        touch(metadata, OLD, b'android { ndkVersion "27.0.12077973" }')
+        deep_scan([self.home], self.index, now=NOW, use_fsevents=False)
+        original = self.index.load_project_ndk_usage_snapshot()
+        self.assertIsNotNone(original)
+        assert original is not None
+
+        metadata.write_bytes(b'android { ndkVersion "28.0.13004108" }')
+        with patch.object(
+            deep_scan_module,
+            "analyze_project_ndk_usage",
+            side_effect=RuntimeError("scan exploded"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "scan exploded"):
+                deep_scan([self.home], self.index, now=NOW, use_fsevents=False)
+
+        self.assertEqual(self.index.load_project_ndk_usage_snapshot(), original)
+        with self.assertRaisesRegex(ValueError, "no generation is in progress"):
+            self.index.record_project_ndk_usage(original.usages[0])
 
     def test_a_history_gap_forces_a_full_walk(self):
         build_stale_project(self.home / "app")

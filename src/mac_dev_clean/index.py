@@ -4,11 +4,13 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import quote
 
 from .fsevents import VolumeIdentity
+from .ndk_usage import NdkUsageSnapshot, ProjectNdkUsage
 from .recommendation import (
     ActionKind,
     Confidence,
@@ -16,9 +18,10 @@ from .recommendation import (
     Recommendation,
     RestorationCost,
     ToolAction,
+    normalized_path,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_INDEX_PATH = Path("~/Library/Caches/mac-dev-clean/index.sqlite3")
 DEFAULT_TOOL_INDEX_PATH = Path("~/Library/Caches/mac-dev-clean/tools.sqlite3")
@@ -44,6 +47,15 @@ CREATE TABLE IF NOT EXISTS recommendations (
 );
 CREATE INDEX IF NOT EXISTS recommendations_by_generation
     ON recommendations (generation);
+CREATE TABLE IF NOT EXISTS project_ndk_usages (
+    generation INTEGER NOT NULL,
+    project_path TEXT NOT NULL,
+    version TEXT,
+    evidence TEXT NOT NULL,
+    PRIMARY KEY (generation, project_path)
+);
+CREATE INDEX IF NOT EXISTS project_ndk_usages_by_generation
+    ON project_ndk_usages (generation);
 """
 
 
@@ -113,9 +125,13 @@ class ScanIndex:
             "DELETE FROM recommendations WHERE generation != ?", (self._generation,)
         )
         self._connection.execute(
+            "DELETE FROM project_ndk_usages WHERE generation != ?", (self._generation,)
+        )
+        self._connection.execute(
             "DELETE FROM generations WHERE generation != ?", (self._generation,)
         )
         self._connection.commit()
+        self._generation = None
 
     def abandon_generation(self) -> None:
         """Leave an interrupted generation on disk but never complete it, so
@@ -167,6 +183,25 @@ class ScanIndex:
         if row is None:
             return None
         return _decode(json.loads(row[0]))
+
+    # -- project NDK usage --------------------------------------------------
+
+    def record_project_ndk_usage(self, usage: ProjectNdkUsage) -> None:
+        if self._generation is None:
+            raise ValueError("no generation is in progress")
+        self._connection.execute(
+            "INSERT OR REPLACE INTO project_ndk_usages"
+            " (generation, project_path, version, evidence) VALUES (?, ?, ?, ?)",
+            (
+                self._generation,
+                normalized_path(usage.project_path),
+                usage.version,
+                json.dumps(usage.evidence),
+            ),
+        )
+
+    def load_project_ndk_usage_snapshot(self) -> Optional[NdkUsageSnapshot]:
+        return _load_project_ndk_usage_snapshot(self._connection)
 
 
 def _decode(payload: dict) -> Recommendation:
@@ -253,6 +288,78 @@ def _read_schema_version(path: Path) -> Optional[int]:
         return int(row[0])
     except (TypeError, ValueError):
         return None
+
+
+def _decode_project_ndk_usage(row: Tuple) -> ProjectNdkUsage:
+    project_path, version, raw_evidence = row
+    if not isinstance(project_path, str) or not project_path:
+        raise ValueError("invalid project path")
+    if version is not None and not isinstance(version, str):
+        raise ValueError("invalid NDK version")
+    if not isinstance(raw_evidence, str):
+        raise ValueError("invalid NDK evidence")
+    evidence = json.loads(raw_evidence)
+    if not isinstance(evidence, list) or not all(
+        isinstance(entry, str) for entry in evidence
+    ):
+        raise ValueError("invalid NDK evidence")
+    return ProjectNdkUsage(
+        project_path=Path(project_path),
+        version=version,
+        evidence=tuple(evidence),
+    )
+
+
+def _load_project_ndk_usage_snapshot(
+    connection: sqlite3.Connection,
+) -> Optional[NdkUsageSnapshot]:
+    row = connection.execute(
+        "SELECT generation, completed_at FROM generations"
+        " WHERE completed_at IS NOT NULL ORDER BY generation DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    generation, completed_at = row
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        raise ValueError("invalid generation")
+    if not isinstance(completed_at, (int, float)) or isinstance(completed_at, bool):
+        raise ValueError("invalid completion timestamp")
+    usages = connection.execute(
+        "SELECT project_path, version, evidence FROM project_ndk_usages"
+        " WHERE generation = ? ORDER BY project_path",
+        (generation,),
+    ).fetchall()
+    return NdkUsageSnapshot(
+        completed_at=datetime.fromtimestamp(float(completed_at), tz=timezone.utc),
+        usages=tuple(_decode_project_ndk_usage(usage) for usage in usages),
+    )
+
+
+def read_project_ndk_usage_snapshot(path: Path) -> Optional[NdkUsageSnapshot]:
+    """Load the latest complete usage generation without creating or repairing it."""
+    uri = "file:{}?mode=ro".format(quote(str(Path(path).resolve()), safe="/"))
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+    except (sqlite3.DatabaseError, OSError):
+        return None
+    try:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None or int(row[0]) != SCHEMA_VERSION:
+            return None
+        return _load_project_ndk_usage_snapshot(connection)
+    except (
+        sqlite3.DatabaseError,
+        OSError,
+        OverflowError,
+        TypeError,
+        ValueError,
+        KeyError,
+    ):
+        return None
+    finally:
+        connection.close()
 
 
 def open_index(path: Optional[Path] = None) -> ScanIndex:
