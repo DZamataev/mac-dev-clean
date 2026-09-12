@@ -244,6 +244,88 @@ import Testing
     #expect(model.noticeMessage == nil)
 }
 
+/// Leaving the Cleanup tab cancels the SwiftUI `.task(id:)` that started the
+/// initial scan. That cancellation must not reach the user as a raw
+/// `Swift.CancellationError`.
+@Test @MainActor func leavingTheCleanupTabDuringTheInitialScanNeverSurfacesACancellationError() async {
+    let gate = ScanGate()
+    let model = AppModel(backend: GatedScanBackend(gate: gate))
+
+    let viewTask = Task { await model.scanIfNeeded() }
+    while await !gate.started { await Task.yield() }
+
+    // The user switches to Deep Scan / Tool-managed: SwiftUI cancels the task.
+    viewTask.cancel()
+    await gate.release()
+    await viewTask.value
+    while model.isBusy { await Task.yield() }
+
+    #expect(model.errorMessage == nil)
+    #expect(model.report != nil)
+    #expect(model.activity == .idle)
+}
+
+/// The manual-scan tabs disable their start button while another scan owns the
+/// backend, so they must say why instead of leaving a dead control.
+@Test @MainActor func manualScanTabsExplainWhyTheirStartButtonIsDisabled() async {
+    let gate = ScanGate()
+    let model = AppModel(backend: GatedScanBackend(gate: gate))
+
+    #expect(model.manualScanBlockedReason == nil)
+
+    let scanTask = Task { await model.scan() }
+    while await !gate.started { await Task.yield() }
+
+    #expect(model.manualScanBlockedReason?.contains("initial scan") == true)
+
+    await gate.release()
+    await scanTask.value
+    while model.isBusy { await Task.yield() }
+
+    #expect(model.manualScanBlockedReason == nil)
+}
+
+private actor ScanGate {
+    private(set) var started = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func markStarted() { started = true }
+
+    func waitForRelease() async {
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private struct GatedScanBackend: CleanupBackendProtocol {
+    let gate: ScanGate
+
+    func scan() async throws -> ScanReport {
+        await gate.markStarted()
+        await gate.waitForRelease()
+        try Task.checkCancellation()
+        let item = fixture(category: "browser-cache", size: 200 * 1024 * 1024)
+        return ScanReport(
+            totalBytes: item.sizeBytes,
+            total: item.size,
+            cleanableTotalBytes: item.sizeBytes,
+            cleanableTotal: item.size,
+            reportOnlyTotalBytes: 0,
+            reportOnlyTotal: "0 B",
+            count: 1,
+            items: [item]
+        )
+    }
+
+    func clean(flags: [String]) async throws -> CleanReport {
+        CleanReport(totalBytes: 0, total: "0 B", count: 0, items: [])
+    }
+}
+
 private func fixture(category: String, size: Int64) -> ScanItem {
     ScanItem(
         category: category,

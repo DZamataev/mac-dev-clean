@@ -56,6 +56,7 @@ final class AppModel: ObservableObject {
     private let toolBackend: (any ToolBackendProtocol)?
     private let startupError: Error?
     private var deepScanTask: Task<Void, Never>?
+    private var initialScanTask: Task<Void, Never>?
     private var toolScanTask: Task<ToolReport, Error>?
 
     init(
@@ -116,9 +117,44 @@ final class AppModel: ObservableObject {
     var isBusy: Bool { activity != .idle }
     var toolScanButtonTitle: String { toolReport == nil ? "Start Tool Scan" : "Scan Again" }
 
+    /// Why the manual scan tabs (Deep Scan, Tool-managed) cannot start right now.
+    /// `nil` means their start button is live.
+    var manualScanBlockedReason: String? {
+        switch activity {
+        case .idle:
+            nil
+        case .scanning:
+            "Waiting for the initial scan to finish. Deep Scan and tool-managed scans can start once it completes."
+        case .cleaning:
+            "Cleanup is running. Wait for it to finish before starting another scan."
+        case .deepScanning:
+            "A deep scan is already running."
+        case .applying:
+            "Project artifacts are being removed. Wait for that to finish."
+        case .loadingTools:
+            "A tool-managed scan is already running."
+        case .applyingTool:
+            "Tool-managed cleanup is running. Wait for it to finish."
+        }
+    }
+
+    /// Started on the Cleanup tab's `.task(id:)`, which SwiftUI cancels as soon as
+    /// the user switches tabs. The scan itself is owned by this unstructured task
+    /// so that leaving the tab neither kills the backend process nor surfaces a raw
+    /// `CancellationError`; late arrivals just await the same task.
     func scanIfNeeded() async {
         guard report == nil else { return }
-        await scan()
+        if let initialScanTask {
+            await initialScanTask.value
+            return
+        }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.scan()
+        }
+        initialScanTask = task
+        await task.value
+        initialScanTask = nil
     }
 
     func scan() async {
@@ -148,6 +184,9 @@ final class AppModel: ObservableObject {
             } else {
                 selectedFlags.formIntersection(validFlags)
             }
+        } catch is CancellationError {
+            // The storage scan was cancelled (e.g. the app is shutting down).
+            // A cancellation the user did not ask about is not an error report.
         } catch {
             let refreshFailure = error.localizedDescription
             if preservingMessages, let errorMessage {

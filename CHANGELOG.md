@@ -30,6 +30,15 @@ All notable changes to this project will be documented in this file.
   active-segment `journal` inspection and explicit `journal --clear`.
 - Extended the same journal to legacy clean and confirmed interactive cleanup.
 
+### Fixed
+
+- Switching to Deep Scan or Tool-managed while the initial storage scan was still
+  running cancelled that scan and surfaced its cancellation as
+  `The operation couldn't be completed. (Swift.CancellationError error 1.)`. The
+  initial scan now survives tab changes, cancellation is never reported as an
+  error, and both manual scan tabs disable their start button while another scan
+  owns the backend while explaining that the initial scan must finish first.
+
 ## 0.5.2 - 2026-07-11
 
 - Added `update_app.sh` to rebuild, safely replace, and relaunch the locally

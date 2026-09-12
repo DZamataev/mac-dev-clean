@@ -502,6 +502,7 @@ struct ToolManagedView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.isBusy)
+                    .help(model.manualScanBlockedReason ?? "Inspect storage through each tool's own CLI")
                 }
 
                 if model.activity.showsToolScanIndicator {
@@ -519,6 +520,12 @@ struct ToolManagedView: View {
                 Text("Scan cancelled.")
                     .font(.caption)
                     .foregroundStyle(.orange)
+            }
+
+            if !model.activity.showsToolScanIndicator, let reason = model.manualScanBlockedReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -810,6 +817,8 @@ struct DeepScanView: View {
                         Task { await model.startDeepScan() }
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy)
+                    .help(model.manualScanBlockedReason ?? "Analyse Git projects for removable build output")
                 }
                 Button("Remove Selected") { showsConfirmation = true }
                     .disabled(model.isBusy || model.deepScanState.selectedIds.isEmpty)
@@ -840,6 +849,12 @@ struct DeepScanView: View {
                 Text("Scan cancelled. Partial results are shown and were not saved for cleanup.")
                     .font(.caption)
                     .foregroundStyle(.orange)
+            }
+
+            if !model.deepScanState.isRunning, let reason = model.manualScanBlockedReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             ForEach(model.deepScanState.warnings) { warning in
